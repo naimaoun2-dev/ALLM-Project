@@ -8,8 +8,6 @@ from datetime import datetime
 from rag_system import RAGSystem
 from admin_panel import AdminPanel
 from download_handler import DownloadHandler
-from utils import format_response
-
 
 
 

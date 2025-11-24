@@ -1,1 +1,4 @@
-invalid type: string "Country: Turkey\nCapital: Ankara\nPopulation: 85 million\nContinent: Europe/Asia\nFlag Colors: Red, White\n\nThe flag of Turkey features the colors: Red, White. The capital city is Ankara and the country is located in Europe/Asia. The population is approximately 85 million.", expected i64oolean f64ntein and the country is located in Africa. The population is approximately 60 
+invalid type: string "Country: India\nCapital: New Delhi\nPopulation: 1.4 billion\nContinent: Asia\nFlag Colors: Saffron, White, Green\n\nThe flag of India features the colors: Saffron, White, Green. The capital city is New Delhi and the country is located in Asia. The population is approximately 1.4 billion.", expected a boolean
+            content = response.text
+
+            # Split lines and

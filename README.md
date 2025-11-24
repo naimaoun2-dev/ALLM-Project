@@ -89,14 +89,12 @@ The application will open in your browser at `http://localhost:8501`
 ├── rag_system.py          # RAG system with Chroma DB
 ├── admin_panel.py         # Admin panel with authentication
 ├── download_handler.py    # PDF and Excel export functionality
-├── utils.py               # Utility functions for formatting
 ├── country_data.py        # Country data for database population
 ├── populate_db.py         # Script to populate database with country info
 ├── requirements.txt       # Python dependencies
-├── env.example            # Environment variables template
+├── rag_utils.py            # Tools
 ├── .env                   # Your environment variables (not in git)
-├── .gitignore            # Git ignore file
-└── chroma_db/            # Chroma DB storage directory (created automatically)
+└── chroma_db/             # Chroma DB storage directory (created automatically)
 ```
 
 ## Technologies
