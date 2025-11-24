@@ -14,6 +14,10 @@ from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
+from langchain.agents import initialize_agent, AgentType
+from rag_utils import query_rag_tool
+from bs4 import BeautifulSoup
+
 
 class RAGSystem:
     """RAG System for querying Chroma DB and handling user documents"""
@@ -49,6 +53,14 @@ class RAGSystem:
             temperature=0.7,
             google_api_key=self.gemini_api_key
         )
+
+        tools = [query_rag_tool]
+        agent = initialize_agent(
+                tools=tools,
+                llm=self.llm,
+                agent=AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION,
+                verbose=True
+            )
         
         # Initialize vector store (create directory if it doesn't exist)
         os.makedirs(self.persist_directory, exist_ok=True)
@@ -72,14 +84,16 @@ class RAGSystem:
         """Setup the retrieval QA chain"""
         # Custom prompt template
         template = """Use the following pieces of context to answer the question at the end.
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
-If the context mentions that the source is "user", indicate that this information was provided by a user.
+                    If you don't know the answer, just say that you don't know, don't try to make up an answer.
+                    If the context mentions that the source is "user", indicate that this information was provided by a user.
 
-Context: {context}
+                    
 
-Question: {question}
+                    Context: {context}
 
-Answer:"""
+                    Question: {question}
+
+                    Answer:"""
         
         prompt = PromptTemplate(
             template=template,
@@ -97,7 +111,7 @@ Answer:"""
             return_source_documents=True
         )
     
-    def query(self, question: str) -> Tuple[str, Dict]:
+    def query(self, question: str) -> Tuple[str, Dict, list]:
         """
         Query the RAG system
         
@@ -105,38 +119,31 @@ Answer:"""
             question: User's question
             
         Returns:
-            Tuple of (answer, source_info)
+            Tuple of (answer, source_info, source_documents)
         """
         # Check if vectorstore has any documents
         try:
             collection_count = self.vectorstore._collection.count()
         except:
             collection_count = 0
-       
+    
         if collection_count == 0:
-            # TODO: Implement internet search as fallback
-            # For now, prompt user to provide information
             return (
                 "I don't have any information in my database yet. "
                 "Please provide the information using the 'Add Document' section in the sidebar, "
-                "and I'll be able to help you with future questions!\n\n"
-                "Note: Internet search functionality is coming soon.",
-                {"source": "empty", "info_type": "empty", "message": "No documents in database"}
+                "and I'll be able to help you with future questions!\n\n",
+                {"source": "empty", "info_type": "empty", "message": "No documents in database"},
+                []
             )
 
-       
-
-        
         # Perform retrieval
         result = self.qa_chain.invoke({"query": question})
-        
         answer = result["result"]
         source_documents = result.get("source_documents", [])
-        
+
         # Determine source information with info_type
         source_info = {"source": "database", "info_type": "db"}
         if source_documents:
-            # Check metadata for info_type
             for doc in source_documents:
                 metadata = doc.metadata
                 info_type = metadata.get("info_type", "db")
@@ -145,30 +152,42 @@ Answer:"""
                     "info_type": info_type,
                     "metadata": metadata
                 }
-                # Prioritize user-provided info
                 if info_type == "user":
                     break
-        print(answer.lower())
 
         unknown_phrases = [
             "i don't know the answer",
             "i don't know",
             "i do not have information",
             "i don't have information",
+            "I fetched data from GeoNames, but I need a more specific question."
         ]
-        # If the answer is empty or not meaningful, fallback to internet
         if not answer or any(phrase in answer.lower() for phrase in unknown_phrases):
-            print("RAG retrieval failed — performing internet search fallback.")
             try:
                 internet_answer = self.internet_search_api_call(question)
             except Exception as e:
                 return (
-                    "Internet search failed. Please try again later.",
-                    {"source": "internet", "info_type": "internet", "error": str(e)}
+                    "Internet Country search failed. Please try again later.",
+                    {"source": "internet", "info_type": "internet", "error": str(e)},
+                    []
                 )
-            return internet_answer, {"source": "internet", "info_type": "internet"}                
+            if not internet_answer or any(phrase in internet_answer.lower() for phrase in unknown_phrases):
+                return internet_answer, {"source": "internet", "info_type": "internet"}, []  
+            else:
+                try:
+                    internet_answer = self.get_time_in_city(question)
+                except Exception as e:
+                    print(str(e))
+                    return (
+                        "Internet Time search failed. Please try again later.",
+                        {"source": "internet", "info_type": "internet", "error": str(e)},
+                        []
+                    )
+                return internet_answer, {"source": "internet", "info_type": "internet"}, []    
 
-        return answer, source_info
+
+        return answer, source_info, source_documents
+
     
     def add_user_document(self, text: str, title: str = "User Document", metadata: Optional[Dict] = None):
         """
@@ -352,3 +371,41 @@ Answer:"""
         except requests.exceptions.RequestException as e:
             print(f"Error fetching GeoNames data: {e}")
             return "Failed to retrieve data from GeoNames."
+
+
+    def get_time_in_city(self, question: str) -> str:
+        """
+        Get the current time in a city using the icalendar37.net gadget API.
+
+        Args:
+            question: A natural language question like "What is the time in London?"
+
+        Returns:
+            A string with the current local time in the requested city.
+        """
+        import re
+
+        # Extract city name from the question
+        match = re.search(r'time in ([\w\s_]+)', question, re.IGNORECASE)
+        if not match:
+            return "Sorry, I could not extract a city from your question."
+
+        city_name = match.group(1).strip().replace(" ", "_")
+
+        print(city_name)
+
+        url = f"https://www.icalendar37.net/gadgets/timeInTheCity/?q={city_name}"
+
+        try:
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            print(data)
+
+            if "time" in data:
+                return f"The current time in {data['city'].replace('_',' ')} is {data['time']} {data['APM']} (Timezone: {data['timezone']})."
+            else:
+                return f"Could not retrieve time for {city_name.replace('_',' ')}."
+
+        except requests.exceptions.RequestException as e:
+            return f"Failed to retrieve time: {e}"
