@@ -26,11 +26,7 @@ pip install -r requirements.txt
 
 ### 2. Configure Environment
 
-Check `.env` and fill in your values:
-
-```bash
-cp env.example .env
-```
+Check `.env` and fill in your values
 
 Edit `.env` and add:
 - `GEMINI_API_KEY`: Your Google Gemini API key (required)
