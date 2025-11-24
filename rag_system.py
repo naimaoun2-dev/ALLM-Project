@@ -160,7 +160,7 @@ class RAGSystem:
             "i don't know",
             "i do not have information",
             "i don't have information",
-            "I fetched data from GeoNames, but I need a more specific question."
+            "i fetched data from geonames, but i need a more specific question."
         ]
         if not answer or any(phrase in answer.lower() for phrase in unknown_phrases):
             try:
@@ -171,13 +171,12 @@ class RAGSystem:
                     {"source": "internet", "info_type": "internet", "error": str(e)},
                     []
                 )
-            if not internet_answer or any(phrase in internet_answer.lower() for phrase in unknown_phrases):
+            if  internet_answer and not any(phrase in internet_answer.lower() for phrase in unknown_phrases):
                 return internet_answer, {"source": "internet", "info_type": "internet"}, []  
             else:
                 try:
                     internet_answer = self.get_time_in_city(question)
                 except Exception as e:
-                    print(str(e))
                     return (
                         "Internet Time search failed. Please try again later.",
                         {"source": "internet", "info_type": "internet", "error": str(e)},
@@ -352,7 +351,7 @@ class RAGSystem:
                 else:
                     # Try fuzzy match if exact match fails
                     for name, info in country_data.items():
-                        if country_name in name:
+                        if country_name in name.lower():
                             return f"The capital of {info['name']} is {info['capital']}."
                     return f"Sorry, I could not find information for '{country_name}'."
 
@@ -392,7 +391,6 @@ class RAGSystem:
 
         city_name = match.group(1).strip().replace(" ", "_")
 
-        print(city_name)
 
         url = f"https://www.icalendar37.net/gadgets/timeInTheCity/?q={city_name}"
 
@@ -400,7 +398,6 @@ class RAGSystem:
             response = requests.get(url, timeout=60)
             response.raise_for_status()
             data = response.json()
-            print(data)
 
             if "time" in data:
                 return f"The current time in {data['city'].replace('_',' ')} is {data['time']} {data['APM']} (Timezone: {data['timezone']})."
