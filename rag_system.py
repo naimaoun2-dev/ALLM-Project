@@ -17,6 +17,7 @@ from langchain.schema import Document
 from langchain.agents import initialize_agent, AgentType
 from rag_utils import query_rag_tool, internet_search_api_call_rag_tool, get_time_tool
 import streamlit as st
+import unicodedata
 
 class RAGSystem:
     """RAG System for querying Chroma DB and handling user documents"""
@@ -292,10 +293,24 @@ class RAGSystem:
 
     def internet_search_api_call(self, question: str) -> str:
         """
-        Fetch country info from GeoNames and return relevant info.
-        Supports queries like 'capital of Lebanon' or 'list countries' or 'list capitals'.
+        Fetch country information from GeoNames and return relevant answers.
+
+        This API handles questions like:
+        - "What is the capital of Lebanon?"
+        - "Beirut is the capital of what country?"
+        - "List countries"
+        - "How many countries are there?"
+
+        Returns:
+            str: Answer to the question based on GeoNames data.
         """
         import requests
+        import unicodedata
+        import string
+
+        def clean_text(s: str) -> str:
+            """Normalize, strip, lowercase a string for comparison."""
+            return unicodedata.normalize("NFKC", s).strip().lower()
 
         print("Internet Search Called")
         url = "http://download.geonames.org/export/dump/countryInfo.txt"
@@ -304,57 +319,55 @@ class RAGSystem:
             response = requests.get(url, timeout=60)
             response.raise_for_status()
             content = response.text
-            print("content is: ", content)
+
             # Split lines and ignore comments
             lines = [line for line in content.splitlines() if not line.startswith("#")]
 
-            # Parse into a dict keyed by country name
+            # Build country dictionary
             country_data = {}
             for line in lines:
                 fields = line.split("\t")
                 if len(fields) > 5:
-                    country_name = fields[4].strip().lower()
-                    print("country_name", country_name)
-                    capital = fields[5].strip()
-                    print("capital_name", capital)
+                    country_name_raw = fields[4].strip()
+                    capital_raw = fields[5].strip()
                     iso = fields[0].strip()
-                    country_data[country_name] = {
-                        "capital": capital,
+
+                    country_data[clean_text(country_name_raw)] = {
+                        "capital": clean_text(capital_raw),
                         "iso": iso,
-                        "name": fields[4].strip()
+                        "name": country_name_raw  # keep original for display
                     }
 
-            q_lower = question.lower().translate(str.maketrans("", "", string.punctuation)).strip()
+            # Normalize the question
+            q_lower = clean_text(question)
+            import re
 
-            # Check if question asks for capital
-            if "capital of" in q_lower:
-                # Extract country name from question
-                country_name = q_lower.split("capital of")[-1].strip()
-                data = country_data.get(country_name)
-                if data:
-                    return f"The capital of {data['name']} is {data['capital']}."
-                else:
-                    # Try fuzzy match if exact match fails
-                    for name, info in country_data.items():
-                        if country_name in name.lower():
-                            return f"The capital of {info['name']} is {info['capital']}."
-                    return f"Sorry, I could not find information for '{country_name}'."
+            q_tokens = set(re.findall(r"\w+", q_lower))  # split question into words
 
-            # List countries
-            elif "list" in q_lower and "countries" in q_lower:
+            for country_name, info in country_data.items():
+                capital_clean = info["capital"]
+                country_clean = country_name
+
+                # Check if any token in the question matches the capital or country
+                if capital_clean in q_tokens:
+                    return f"{info['capital'].title()} is the capital of {info['name']}."
+                if country_clean in q_tokens:
+                    return f"The capital of {info['name']} is {info['capital'].title()}."
+            # Handle generic list/count questions
+            if "list" in q_lower and "countries" in q_lower:
                 top_countries = [v["name"] for i, v in enumerate(country_data.values()) if i < 20]
                 return "Countries (top 20 shown):\n" + "\n".join(top_countries)
 
-            # How many countries
-            elif "how many countries" in q_lower:
+            if "how many countries" in q_lower:
                 return f"There are {len(country_data)} countries in the GeoNames database."
 
-            else:
-                return "I fetched data from GeoNames, but I need a more specific question."
+            # Fallback if nothing matches
+            return "I fetched data from GeoNames, but I need a more specific question."
 
         except requests.exceptions.RequestException as e:
             print(f"Error fetching GeoNames data: {e}")
             return "Failed to retrieve data from GeoNames."
+
 
 
     def get_time_in_city(self, question: str) -> str:
@@ -393,3 +406,6 @@ class RAGSystem:
 
         except requests.exceptions.RequestException as e:
             return f"Failed to retrieve time: {e}"
+
+    
+      
