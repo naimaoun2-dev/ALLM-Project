@@ -6,44 +6,74 @@ import streamlit as st
 
 
 @tool
-def query_rag_tool(question: str) -> str:
+def query_rag_tool(question: str) -> dict:
     """
-    Query the RAG knowledge base via session state.
+    Direct RAG retrieval tool.
+    Uses the internal qa_chain, NOT rag.query() to avoid recursion.
+    Returns structured metadata.
     """
     rag = st.session_state.rag_system
-    answer, info = rag.query(question)
-    return f"{answer}\n[Source: {info.get('source')}, Type: {info.get('info_type')}]"
+
+    result = rag.qa_chain.invoke({"query": question})
+    answer = result["result"]
+    source_documents = result.get("source_documents", [])
+
+    # Build metadata for UI
+    source_info = {"source": "database", "info_type": "db"}
+
+    if source_documents:
+        metadata = source_documents[0].metadata
+        source_info = {
+            "source": metadata.get("source", "database"),
+            "info_type": metadata.get("info_type", "db"),
+            "metadata": metadata
+        }
+
+    return {
+        "answer": answer,
+        "source_info": source_info,
+        "source_documents": source_documents
+    }
+
 
 @tool
-def internet_search_api_call_rag_tool(question: str) -> str:
+def internet_search_api_call_rag_tool(question: str) -> dict:
     """
-    Tool wrapper for the RAG system's internet fallback search.
-    Uses GeoNames API to fetch country information.
+    Internet fallback tool using GeoNames.
+    Returns structured result.
     """
     rag = st.session_state.rag_system
 
     answer = rag.internet_search_api_call(question)
 
-    return f"{answer}\n[Source: internet, Type: internet]"
+    return {
+        "answer": answer,
+        "source_info": {"source": "internet", "info_type": "internet"},
+        "source_documents": []
+    }
 
 
 @tool
-def get_time_tool(question: str) -> str:
+def get_time_tool(question: str) -> dict:
     """
-    Tool wrapper to get the local time in a city using timeanddate.com
-    Expects question like 'Time in London' or 'What is the time in New York?'
+    Get local time in a city.
+    Returns structured result.
     """
-    # Extract city from the question (simple approach)
+    # Extract city
     lower_q = question.lower()
     if "time in" in lower_q:
         city = question.lower().split("time in")[-1].strip().title()
     else:
         city = question.strip().title()
-    
-    rag = st.session_state.rag_system
 
+    rag = st.session_state.rag_system
     answer = rag.get_time_in_city(city)
-    return f"{answer}\n[Source: internet, Type: time]"    
+
+    return {
+        "answer": answer,
+        "source_info": {"source": "internet", "info_type": "time"},
+        "source_documents": []
+    }
 
 
     

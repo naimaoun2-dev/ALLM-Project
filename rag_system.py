@@ -15,8 +15,7 @@ from langchain.prompts import PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from langchain.agents import initialize_agent, AgentType
-from rag_utils import query_rag_tool
-from bs4 import BeautifulSoup
+from rag_utils import query_rag_tool, internet_search_api_call_rag_tool, get_time_tool
 
 
 class RAGSystem:
@@ -54,8 +53,13 @@ class RAGSystem:
             google_api_key=self.gemini_api_key
         )
 
-        tools = [query_rag_tool]
-        agent = initialize_agent(
+        tools = [
+                    query_rag_tool,
+                    internet_search_api_call_rag_tool,
+                    get_time_tool
+                ]
+
+        self.agent = initialize_agent(
                 tools=tools,
                 llm=self.llm,
                 agent=AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION,
@@ -83,17 +87,19 @@ class RAGSystem:
     def _setup_retrieval_chain(self):
         """Setup the retrieval QA chain"""
         # Custom prompt template
-        template = """Use the following pieces of context to answer the question at the end.
+        template = """<rules>
+        Use the following pieces of context to answer the question at the end.
                     If you don't know the answer, just say that you don't know, don't try to make up an answer.
                     If the context mentions that the source is "user", indicate that this information was provided by a user.
-
+</rules>
                     
-
+<output_format>
                     Context: {context}
 
                     Question: {question}
 
-                    Answer:"""
+                    Answer: 
+</output_format>"""
         
         prompt = PromptTemplate(
             template=template,
@@ -113,79 +119,55 @@ class RAGSystem:
     
     def query(self, question: str) -> Tuple[str, Dict, list]:
         """
-        Query the RAG system
-        
-        Args:
-            question: User's question
-            
+        Query using the agent.
+        Tools will handle: 
+            - RAG retrieval (query_rag_tool)
+            - Internet fallback (internet_search_api_call_rag_tool)
+            - Time lookup (get_time_tool)
+
         Returns:
-            Tuple of (answer, source_info, source_documents)
+            (answer, source_info, source_documents)
         """
-        # Check if vectorstore has any documents
+
+        # --- 1. Check database first (optional, same as before) ---
         try:
+            print("Collectinon Count Try")
             collection_count = self.vectorstore._collection.count()
         except:
             collection_count = 0
-    
+
         if collection_count == 0:
             return (
                 "I don't have any information in my database yet. "
-                "Please provide the information using the 'Add Document' section in the sidebar, "
-                "and I'll be able to help you with future questions!\n\n",
-                {"source": "empty", "info_type": "empty", "message": "No documents in database"},
+                "Please provide the information using the 'Add Document' section in the sidebar.",
+                {"source": "empty", "info_type": "empty"},
                 []
             )
 
-        # Perform retrieval
-        result = self.qa_chain.invoke({"query": question})
-        answer = result["result"]
-        source_documents = result.get("source_documents", [])
+        # --- 2. Ask the agent to solve the query ---
+        try:
+            print("Invoking Agent")
+            result = self.agent.invoke({"input": question})
+        except Exception:
+            print(" Exception Invoking Agent")
+            result = self.agent.run(question)
 
-        # Determine source information with info_type
-        source_info = {"source": "database", "info_type": "db"}
-        if source_documents:
-            for doc in source_documents:
-                metadata = doc.metadata
-                info_type = metadata.get("info_type", "db")
-                source_info = {
-                    "source": metadata.get("source", "database"),
-                    "info_type": info_type,
-                    "metadata": metadata
-                }
-                if info_type == "user":
-                    break
+        # --- 3. Tool output is structured if a tool was used ---
+        if isinstance(result, dict) and "answer" in result:
+            print("In Answer")
+            return (
+                result["answer"],
+                result.get("source_info", {"source": "agent", "info_type": "agent"}),
+                result.get("source_documents", [])
+            )
 
-        unknown_phrases = [
-            "i don't know the answer",
-            "i don't know",
-            "i do not have information",
-            "i don't have information",
-            "i fetched data from geonames, but i need a more specific question."
-        ]
-        if not answer or any(phrase in answer.lower() for phrase in unknown_phrases):
-            try:
-                internet_answer = self.internet_search_api_call(question)
-            except Exception as e:
-                return (
-                    "Internet Country search failed. Please try again later.",
-                    {"source": "internet", "info_type": "internet", "error": str(e)},
-                    []
-                )
-            if  internet_answer and not any(phrase in internet_answer.lower() for phrase in unknown_phrases):
-                return internet_answer, {"source": "internet", "info_type": "internet"}, []  
-            else:
-                try:
-                    internet_answer = self.get_time_in_city(question)
-                except Exception as e:
-                    return (
-                        "Internet Time search failed. Please try again later.",
-                        {"source": "internet", "info_type": "internet", "error": str(e)},
-                        []
-                    )
-                return internet_answer, {"source": "internet", "info_type": "internet"}, []    
+        # --- 4. Fallback: agent returned a plain string ---
+        return (
+            result,
+            {"source": "agent", "info_type": "agent"},
+            []
+        )
 
-
-        return answer, source_info, source_documents
 
     
     def add_user_document(self, text: str, title: str = "User Document", metadata: Optional[Dict] = None):

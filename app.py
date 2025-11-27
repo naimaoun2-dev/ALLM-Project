@@ -222,9 +222,9 @@ def main():
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 try:
-                    response, source_info, source_documents = st.session_state.rag_system.query(prompt)
+                    answer, source_info, source_documents = st.session_state.rag_system.query(prompt)
 
-                    formatted_response = response.strip()  # remove leading/trailing whitespace
+                    formatted_response = answer.strip()  # remove leading/trailing whitespace
                     st.markdown(formatted_response, unsafe_allow_html=False)
                     info_type = source_info.get("info_type", "db")
 
@@ -255,7 +255,7 @@ def main():
                         st.session_state.messages.append({
                             "role": "tool",
                             "tool_name": "internet_search",
-                            "content": response
+                            "content": answer
                         })
 
 
