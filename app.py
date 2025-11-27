@@ -223,8 +223,14 @@ def main():
             with st.spinner("Thinking..."):
                 try:
                     answer, source_info, source_documents = st.session_state.rag_system.query(prompt)
-
-                    formatted_response = answer.strip()  # remove leading/trailing whitespace
+                    print(answer)
+                    print("SEP")
+                    print(answer.get("content"))
+                    print("SEP")
+                    print(source_info)
+                    print("SEP")
+                    
+                    formatted_response = answer.get("output", "").strip()
                     st.markdown(formatted_response, unsafe_allow_html=False)
                     info_type = source_info.get("info_type", "db")
 

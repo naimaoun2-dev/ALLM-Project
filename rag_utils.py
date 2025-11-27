@@ -40,7 +40,16 @@ def query_rag_tool(question: str) -> dict:
 def internet_search_api_call_rag_tool(question: str) -> dict:
     """
     Internet fallback tool using GeoNames.
-    Returns structured result.
+    Use this tool when the answer is **not available in the local knowledge base (RAG)** 
+    or when the question requires **general world knowledge, current events, geography, 
+    or facts about people, places, or things**. 
+    For example, questions like "Beirut is the capital of what country?" 
+    should use this tool.
+    
+    Returns a structured result containing:
+        - answer: the answer string from the internet
+        - source_info: metadata indicating the source is internet
+        - source_documents: an empty list (can be extended if using sources)
     """
     rag = st.session_state.rag_system
 

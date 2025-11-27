@@ -16,7 +16,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from langchain.agents import initialize_agent, AgentType
 from rag_utils import query_rag_tool, internet_search_api_call_rag_tool, get_time_tool
-
+import streamlit as st
 
 class RAGSystem:
     """RAG System for querying Chroma DB and handling user documents"""
@@ -147,9 +147,9 @@ class RAGSystem:
         # --- 2. Ask the agent to solve the query ---
         try:
             print("Invoking Agent")
-            result = self.agent.invoke({"input": question})
+            result = self.agent.invoke({"input": question, "chat_history":  st.session_state.messages})
         except Exception:
-            print(" Exception Invoking Agent")
+            print("Exception Invoking Agent")
             result = self.agent.run(question)
 
         # --- 3. Tool output is structured if a tool was used ---
@@ -297,13 +297,14 @@ class RAGSystem:
         """
         import requests
 
+        print("Internet Search Called")
         url = "http://download.geonames.org/export/dump/countryInfo.txt"
 
         try:
             response = requests.get(url, timeout=60)
             response.raise_for_status()
             content = response.text
-
+            print("content is: ", content)
             # Split lines and ignore comments
             lines = [line for line in content.splitlines() if not line.startswith("#")]
 
@@ -313,7 +314,9 @@ class RAGSystem:
                 fields = line.split("\t")
                 if len(fields) > 5:
                     country_name = fields[4].strip().lower()
+                    print("country_name", country_name)
                     capital = fields[5].strip()
+                    print("capital_name", capital)
                     iso = fields[0].strip()
                     country_data[country_name] = {
                         "capital": capital,
@@ -365,12 +368,14 @@ class RAGSystem:
             A string with the current local time in the requested city.
         """
         import re
-
+        print("Start of Method")
         # Extract city name from the question
         match = re.search(r'time in ([\w\s_]+)', question, re.IGNORECASE)
+        print("match", match)
         if not match:
             return "Sorry, I could not extract a city from your question."
 
+        print("After If")
         city_name = match.group(1).strip().replace(" ", "_")
 
 
