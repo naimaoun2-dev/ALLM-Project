@@ -35,6 +35,8 @@ if "lockout_until" not in st.session_state:
     st.session_state.lockout_until = None
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "last_tool_metadata" not in st.session_state:
+     st.session_state.last_tool_metadata = {}    
 
 def initialize_rag_system():
     """Initialize the RAG system"""
@@ -168,32 +170,55 @@ def main():
 
         if role == "user":
             with st.chat_message("user"):
-                st.markdown(message["content"])
+                st.markdown(message.get("content", ""))
 
         elif role == "assistant":
             with st.chat_message("assistant"):
                 st.markdown(message.get("content", ""))
+
                 # Display info badge
-                if "info_type" in message:
-                    info_type = message["info_type"]
+                info_type = message.get("info_type")
+                if info_type:
                     if info_type == "user":
                         st.caption("ℹ️ Info Type: User-provided")
                     elif info_type == "db":
                         st.caption("📚 Info Type: Database")
                     elif info_type == "internet":
                         st.caption("🌐 Info Type: Internet")
+                    elif info_type == "time":
+                        st.caption("⏰ Info Type: Time")
                     else:
                         st.caption(f"Info Type: {info_type}")
 
-                # Display tool call if present
-                if "tool_name" in message and "tool_args" in message:
-                    with st.status(f"🛠 Tool call: {message['tool_name']}"):
-                        st.json(message["tool_args"])
+                # Display tool call and details if present
+                tool_call = message.get("tool_call")
+                tool_details = message.get("tool_details")
+                tool_name = message.get("tool_name")
+
+                if tool_call:
+                    st.write(f"🛠️ Tool used: {tool_name or 'Unknown'}")
+                    st.json(tool_call)
+
+                    if tool_details:
+                        st.write("📄 Tool details:")
+                        st.json(tool_details)
 
         elif role == "tool":
             with st.chat_message("assistant"):
-                with st.status(f"🔧 Tool result: {message['tool_name']}"):
-                    st.markdown(message["content"])                
+                tool_name = message.get("tool_name", "Unknown Tool")
+                with st.status(f"🔧 Tool result: {tool_name}"):
+                    st.markdown(message.get("content", ""))
+
+                    # Optionally show tool metadata if available
+                    tool_call = message.get("tool_call")
+                    tool_details = message.get("tool_details")
+                    if tool_call:
+                        st.write("🛠️ Tool metadata:")
+                        st.json(tool_call)
+                    if tool_details:
+                        st.write("📄 Tool details:")
+                        st.json(tool_details)
+
     
     # Chat input - always show, even if RAG system isn't initialized
     if prompt := st.chat_input("Ask a question..."):
@@ -218,66 +243,80 @@ def main():
             st.markdown(prompt)
         
         
-        # Get response from RAG system
+       # Get response from RAG system
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 try:
-                    answer, source_info, source_documents = st.session_state.rag_system.query(prompt)
-                    print(answer)
-                    print("SEP")
-                    print(answer.get("content"))
-                    print("SEP")
-                    print(source_info)
-                    print("SEP")
-                    
-                    formatted_response = answer.get("output", "").strip()
+                    # Query RAG system
+                    answer, source_info, source_documents, tool_call, tool_details = st.session_state.rag_system.query(prompt)
+
+                    # Format answer
+                    if isinstance(answer, dict):
+                        formatted_response = answer.get("output", answer.get("content", "")).strip()
+                    else:
+                        formatted_response = str(answer).strip()
+
                     st.markdown(formatted_response, unsafe_allow_html=False)
-                    info_type = source_info.get("info_type", "db")
+                    info_type = source_info.get("info_type", "agent")
 
-                    # Vectorstore retrieval tool call
+                    # Determine tool_name
                     if info_type == "db":
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "tool_name": "vectorstore_retrieval",
-                            "tool_args": {"query": prompt}
-                        })
-
-                        # Tool result (retrieved documents)
-                        st.session_state.messages.append({
-                            "role": "tool",
-                            "tool_name": "vectorstore_retrieval",
-                            "content": f"Retrieved {len(source_documents)} document chunks"
-                        })
-
-                    # Internet search tool call
+                        tool_name = "vectorstore_retrieval"
                     elif info_type == "internet":
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "tool_name": "internet_search",
-                            "tool_args": {"question": prompt}
-                        })
+                        tool_name = "internet_search"
+                        if source_info.get("source") == "overpass":
+                            tool_name = "overpass_restaurants"
+                    elif info_type == "time":
+                        tool_name = "get_time_tool"
+                    else:
+                        tool_name = None
 
-                        # Tool result
+                    # Store assistant message with tool metadata
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": formatted_response,
+                        "source": source_info.get("source", "unknown") if source_info else "unknown",
+                        "info_type": info_type,
+                        "tool_call": tool_call,
+                        "tool_details": tool_details
+                    })
+
+                    # Store tool message if tool was used
+                    if tool_call:
+                        tool_content = ""
+                        if info_type == "db":
+                            tool_content = f"Retrieved {len(source_documents)} document chunks"
+                        elif info_type in ["internet", "time"]:
+                            tool_content = answer
+
                         st.session_state.messages.append({
                             "role": "tool",
-                            "tool_name": "internet_search",
-                            "content": answer
+                            "tool_name": tool_name,
+                            "content": tool_content,
+                            "tool_call": tool_call,
+                            "tool_details": tool_details
                         })
 
+                        # Display tool metadata
+                        st.write("🛠️ Tool was used:")
+                        st.json(tool_call)
+                        if tool_details:
+                            st.write("📄 Tool details:")
+                            st.json(tool_details)
+                    else:
+                        st.write("No tool was used.")
 
-
-
-                    # Show source information based on info_type
+                    # Display source information
                     if info_type == "user":
                         st.info("ℹ️ This information was provided by a user")
                     elif info_type == "db":
                         st.success("📚 Retrieved from database")
-                    elif info_type == "internet":
+                    elif info_type in ["internet", "time"]:
                         st.warning("🌐 Retrieved from internet")
                     else:
                         st.caption(f"Info Type: {info_type}")
-                    
-                    # Show tool content (retrieved documents)
+
+                    # Display retrieved documents
                     if source_documents:
                         with st.expander("📄 Retrieved documents"):
                             for doc in source_documents:
@@ -285,13 +324,7 @@ def main():
                                 if "title" in doc.metadata:
                                     st.caption(f"Title: {doc.metadata['title']}")
 
-                    # Add assistant message to session state
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": formatted_response,
-                        "source": source_info.get("source", "unknown") if source_info else "unknown",
-                        "info_type": info_type
-                    })
+                    # Add chat history
                     st.session_state.chat_history.append({
                         "role": "assistant",
                         "content": formatted_response,
@@ -299,6 +332,7 @@ def main():
                         "info_type": info_type,
                         "timestamp": datetime.now().isoformat()
                     })
+
                 except Exception as e:
                     error_msg = f"Error: {str(e)}"
                     st.error(error_msg)
@@ -306,6 +340,7 @@ def main():
                         "role": "assistant",
                         "content": error_msg
                     })
+
 
 
 

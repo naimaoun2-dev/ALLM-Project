@@ -11,10 +11,11 @@ A powerful chatbot application built with Streamlit and LangChain that uses RAG 
    - `user`: Information provided by users
    - `internet`: Information retrieved from internet (placeholder)
 4. **User Document Input**: If the database doesn't have information, users can provide it and it's saved with metadata `info_type: user`
-5. **Source Indication**: When information is retrieved, the system indicates the info type (db/user/internet)
-6. **Download Functionality**: Export chat history as PDF or Excel
-7. **Admin Panel**: Password-protected admin panel with 3 login attempts and 30-second lockout
-8. **Beautiful Outputs**: Formatted and beautified responses
+5. **Restaurant Lookup (Overpass API)**: Ask for restaurants near any city and the app queries OpenStreetMap's Overpass API for live results
+6. **Source Indication**: When information is retrieved, the system indicates the info type (db/user/internet)
+7. **Download Functionality**: Export chat history as PDF or Excel
+8. **Admin Panel**: Password-protected admin panel with 3 login attempts and 30-second lockout
+9. **Beautiful Outputs**: Formatted and beautified responses
 
 ## Setup
 
@@ -58,6 +59,7 @@ The application will open in your browser at `http://localhost:8501`
 - Type your questions in the chat input
 - The system will search the Chroma DB for relevant information
 - If no information is found, you'll be prompted to add it
+- Ask for restaurants near a city (e.g., "restaurants in Madrid") to fetch live listings via Overpass API
 
 ### Adding Documents
 1. Go to the sidebar

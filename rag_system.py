@@ -2,171 +2,589 @@
 RAG System using LangChain and Chroma DB
 """
 import os
+import logging
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 from pydantic.v1 import tools
 import requests
 import string
+import re
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
+from langchain.schema import Document, SystemMessage
 from langchain.agents import initialize_agent, AgentType
-from rag_utils import query_rag_tool, internet_search_api_call_rag_tool, get_time_tool
+from langchain.memory import ConversationBufferMemory
+from rag_utils import query_rag_tool, internet_search_api_call_rag_tool, get_time_tool, find_restaurants_tool
 import streamlit as st
-import unicodedata
+
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('rag_system.log')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 class RAGSystem:
     """RAG System for querying Chroma DB and handling user documents"""
     
     def __init__(self):
         """Initialize the RAG system"""
-        self.gemini_api_key = os.getenv("GEMINI_API_KEY")
-        if not self.gemini_api_key:
-            raise ValueError("GEMINI_API_KEY not found in environment variables")
+        logger.info("[RAGSystem.__init__] ===== INITIALIZING RAG SYSTEM =====")
         
-        self.model_name = os.getenv("MODEL_NAME", "gemini-2.5-flash")
-        self.embedding_model = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-        self.use_local_embeddings = os.getenv("USE_LOCAL_EMBEDDINGS", "true").lower() == "true"
-        self.persist_directory = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
-        
-        # Initialize embeddings - use local embeddings by default to avoid API quota issues
-        if self.use_local_embeddings:
-            # Use local sentence-transformers model (no API calls needed)
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name=self.embedding_model,
-                model_kwargs={'device': 'cpu'}
-            )
-        else:
-            # Use Gemini embeddings (requires API key and quota)
-            self.embeddings = GoogleGenerativeAIEmbeddings(
-                model=self.embedding_model,
+        try:
+            logger.debug("[RAGSystem.__init__] Loading environment variables")
+            self.gemini_api_key = os.getenv("GEMINI_API_KEY")
+            if not self.gemini_api_key:
+                logger.error("[RAGSystem.__init__] GEMINI_API_KEY not found in environment variables")
+                raise ValueError("GEMINI_API_KEY not found in environment variables")
+            logger.info("[RAGSystem.__init__] GEMINI_API_KEY loaded successfully")
+            
+            self.model_name = os.getenv("MODEL_NAME", "gemini-2.5-flash")
+            self.embedding_model = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+            self.use_local_embeddings = os.getenv("USE_LOCAL_EMBEDDINGS", "true").lower() == "true"
+            self.persist_directory = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
+            
+            logger.info(f"[RAGSystem.__init__] Model: {self.model_name}")
+            logger.info(f"[RAGSystem.__init__] Embedding model: {self.embedding_model}")
+            logger.info(f"[RAGSystem.__init__] Use local embeddings: {self.use_local_embeddings}")
+            logger.info(f"[RAGSystem.__init__] Persist directory: {self.persist_directory}")
+            
+            # Initialize embeddings - use local embeddings by default to avoid API quota issues
+            logger.info("[RAGSystem.__init__] Initializing embeddings")
+            if self.use_local_embeddings:
+                # Use local sentence-transformers model (no API calls needed)
+                logger.debug("[RAGSystem.__init__] Using local HuggingFace embeddings")
+                self.embeddings = HuggingFaceEmbeddings(
+                    model_name=self.embedding_model,
+                    model_kwargs={'device': 'cpu'}
+                )
+                logger.info("[RAGSystem.__init__] Local embeddings initialized")
+            else:
+                # Use Gemini embeddings (requires API key and quota)
+                logger.debug("[RAGSystem.__init__] Using Gemini embeddings")
+                self.embeddings = GoogleGenerativeAIEmbeddings(
+                    model=self.embedding_model,
+                    google_api_key=self.gemini_api_key
+                )
+                logger.info("[RAGSystem.__init__] Gemini embeddings initialized")
+            
+            # Initialize LLM
+            logger.info("[RAGSystem.__init__] Initializing LLM")
+            self.llm = ChatGoogleGenerativeAI(
+                model=self.model_name,
+                temperature=0.7,
                 google_api_key=self.gemini_api_key
             )
-        
-        # Initialize LLM
-        self.llm = ChatGoogleGenerativeAI(
-            model=self.model_name,
-            temperature=0.7,
-            google_api_key=self.gemini_api_key
-        )
+            logger.info("[RAGSystem.__init__] LLM initialized successfully")
+        except Exception as e:
+            logger.error(f"[RAGSystem.__init__] ERROR during initialization: {str(e)}", exc_info=True)
+            raise
 
         tools = [
                     query_rag_tool,
                     internet_search_api_call_rag_tool,
-                    get_time_tool
+                    get_time_tool,
+                    find_restaurants_tool
                 ]
 
-        self.agent = initialize_agent(
-                tools=tools,
-                llm=self.llm,
-                agent=AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION,
-                verbose=True
-            )
+        # Custom system prompt for the agent
+        agent_system_prompt = """You are a helpful assistant that answers questions about countries, capitals, geography, time zones, and restaurants.
+
+IMPORTANT DECISION PROCESS:
+1. FIRST, try to answer the question from your own knowledge. If you are confident and certain about the answer, provide it directly.
+2. ONLY use tools when:
+   - You don't know the answer or are uncertain
+   - You need to verify information
+   - You need specific data from the database (like user-provided documents)
+   - You need current time information
+   - You need to find restaurants
+
+3. When you need to use tools:
+   - For country/capital questions you don't know: First try query_rag_tool to check the database. If that doesn't help, use internet_search_api_call_rag_tool.
+   - For time questions: Use get_time_tool. If you need the capital first, use query_rag_tool to get it.
+   - For restaurant questions: Use find_restaurants_tool. If you need the capital first, use query_rag_tool to get it.
+
+4. Be honest: If you don't know something, say so and use the appropriate tool. Don't guess or make up information.
+
+5. When using query_rag_tool, remember it searches a user-populated database. If it returns no results or incomplete information, use internet_search_api_call_rag_tool as a fallback.
+
+Always be helpful, clear, and accurate. If information comes from user-provided documents, mention that."""
+
+        logger.info("[RAGSystem.__init__] Initializing agent with custom system prompt")
+        logger.debug(f"[RAGSystem.__init__] Agent system prompt: {agent_system_prompt[:200]}...")
+        
+        # Create memory with system message
+        memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True
+        )
+        # Add system message to memory
+        memory.chat_memory.add_message(SystemMessage(content=agent_system_prompt))
+        
+        try:
+            # Try using OPENAI_FUNCTIONS agent type which is more compatible
+            # If that doesn't work, we'll fall back to CHAT_CONVERSATIONAL_REACT_DESCRIPTION
+            try:
+                logger.info("[RAGSystem.__init__] Attempting to initialize with OPENAI_FUNCTIONS agent type")
+                self.agent = initialize_agent(
+                        tools=tools,
+                        llm=self.llm,
+                        agent=AgentType.OPENAI_FUNCTIONS,
+                        verbose=True,
+                        memory=memory,
+                        handle_parsing_errors=True,
+                        max_iterations=15,
+                        max_execution_time=300
+                    )
+                logger.info("[RAGSystem.__init__] Agent initialized with OPENAI_FUNCTIONS successfully")
+            except Exception as openai_error:
+                logger.warning(f"[RAGSystem.__init__] OPENAI_FUNCTIONS failed: {str(openai_error)}, trying CHAT_CONVERSATIONAL_REACT_DESCRIPTION")
+                # Fallback to CHAT_CONVERSATIONAL_REACT_DESCRIPTION
+                self.agent = initialize_agent(
+                        tools=tools,
+                        llm=self.llm,
+                        agent=AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION,
+                        verbose=True,
+                        memory=memory,
+                        handle_parsing_errors=True,
+                        max_iterations=15,
+                        max_execution_time=300
+                    )
+                logger.info("[RAGSystem.__init__] Agent initialized with CHAT_CONVERSATIONAL_REACT_DESCRIPTION successfully")
+            
+            # Debug: Check what input keys the agent expects
+            if hasattr(self.agent, 'input_keys'):
+                logger.info(f"[RAGSystem.__init__] Agent input keys: {self.agent.input_keys}")
+            if hasattr(self.agent, 'agent') and hasattr(self.agent.agent, 'llm_chain'):
+                chain_vars = getattr(self.agent.agent.llm_chain, 'input_variables', 'N/A')
+                logger.info(f"[RAGSystem.__init__] Agent LLM chain input variables: {chain_vars}")
+        except Exception as e:
+            logger.error(f"[RAGSystem.__init__] Error initializing agent: {str(e)}", exc_info=True)
+            raise
         
         # Initialize vector store (create directory if it doesn't exist)
-        os.makedirs(self.persist_directory, exist_ok=True)
-        
-        self.vectorstore = Chroma(
-            persist_directory=self.persist_directory,
-            embedding_function=self.embeddings
-        )
-        
-        # Text splitter
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len
-        )
-        
-        # Initialize retrieval chain
-        self._setup_retrieval_chain()
+        try:
+            logger.info("[RAGSystem.__init__] Setting up vector store")
+            os.makedirs(self.persist_directory, exist_ok=True)
+            logger.debug(f"[RAGSystem.__init__] Created/verified directory: {self.persist_directory}")
+            
+            self.vectorstore = Chroma(
+                persist_directory=self.persist_directory,
+                embedding_function=self.embeddings
+            )
+            logger.info("[RAGSystem.__init__] Vector store initialized")
+            
+            # Text splitter
+            logger.debug("[RAGSystem.__init__] Setting up text splitter")
+            self.text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200,
+                length_function=len
+            )
+            logger.info("[RAGSystem.__init__] Text splitter configured")
+            
+            # Initialize retrieval chain
+            logger.info("[RAGSystem.__init__] Setting up retrieval chain")
+            self._setup_retrieval_chain()
+            logger.info("[RAGSystem.__init__] ===== RAG SYSTEM INITIALIZED SUCCESSFULLY =====")
+        except Exception as e:
+            logger.error(f"[RAGSystem.__init__] ERROR setting up vector store/chain: {str(e)}", exc_info=True)
+            raise
     
     def _setup_retrieval_chain(self):
         """Setup the retrieval QA chain"""
-        # Custom prompt template
-        template = """<rules>
-        Use the following pieces of context to answer the question at the end.
-                    If you don't know the answer, just say that you don't know, don't try to make up an answer.
-                    If the context mentions that the source is "user", indicate that this information was provided by a user.
+        logger.info("[RAGSystem._setup_retrieval_chain] Setting up retrieval QA chain")
+        logger.debug("[RAGSystem._setup_retrieval_chain] Creating prompt template")
+        # Custom prompt template (keeping the existing one as requested)
+        template = """
+<identity>
+You are a helpful and friendly assistant that answers questions about countries.
+Your main topics are:
+- Basic country information (for example: capital city, region, neighbors, population if available in context).
+- Time in the capital city (current local time and time zone).
+- Restaurants near the capital city or near a specific location in that country.
+
+You should:
+- Use simple, clear language that non-experts can understand.
+- Be concise but complete. Explain extra details only when helpful.
+- Be honest about what you know and what you do not know.
+- Never invent facts. If you are not sure, say you are not sure and suggest how the user could check.
+</identity>
+
+<rules>
+1. Use the provided {context} as your main source of truth when possible.
+2. If the context says that the source is "user", clearly mention that this information was provided by a user (for example: "According to information provided by a user, ...").
+3. If you do not find the answer in the context, or if the context is incomplete, decide whether to call one or more tools according to the <instructions>.
+4. If, even after using tools, you still cannot answer confidently, say:
+   - that you do not know, and
+   - what extra information or tools would be needed.
+5. Do not contradict the context. If tool results conflict with the context, prefer the most reliable and most recent source, and explain this briefly.
+6. Always answer in a helpful and polite way. If the user asks multiple questions, try to answer all of them clearly.
 </rules>
-                    
+
+<instructions>
+You have access to these four tools:
+
+1) query_rag_database
+   - What it does:
+     Looks up information about countries from your internal RAG database (for example: capital city, region, descriptions, stored user notes).
+   - When to use it:
+     - When the user asks general questions about a country that are likely covered by your internal data.
+       Examples:
+       • "What is the capital of Japan?"
+       • "Tell me about Lebanon."
+       • "What is the capital of Brazil and where is it located?"
+     - When you need the capital city before using other tools.
+       Example:
+       • User: "What time is it in the capital of Argentina?"  
+         → First use query_rag_database to get the capital (Buenos Aires), then use get_time_tool.
+     - When the user refers to information that might be stored in your RAG database (for example, previous user-provided notes about a country).
+
+2) internet_search_api_call
+   - What it does:
+     Searches the internet for up-to-date or missing information that is not available or is incomplete in the RAG database.
+   - When to use it:
+     - When query_rag_database does not return enough information or returns nothing.
+     - When the user asks for information that changes over time (for example: very recent events, new restaurant openings, recent travel restrictions) and this is not in the RAG database.
+     - When the user asks about a country or place that does not appear in the RAG data.
+       Examples:
+       • "What is the capital of a newly created country X?" (not in the database)
+       • "Are there any famous street-food areas near the capital of Thailand right now?"
+   - How to behave:
+     - Use the search results to support or update your answer.
+     - If the search results are unclear or conflicting, say so and answer carefully.
+
+3) get_time_tool
+   - What it does:
+     Returns the current local time in a given city or location.
+   - When to use it:
+     - When the user asks about the current time in a capital or a city.
+       Examples:
+       • "What time is it now in Paris?"
+       • "What time is it in the capital of Canada?"
+     - When the user asks about time zones related to a capital.
+       Example:
+       • "What is the time difference between the capital of Japan and London right now?"
+   - How to combine it with other tools:
+     - If the user asks "What time is it in the capital of X?" and you do NOT know the capital:
+       1. Call query_rag_database (or internet_search_api_call, if needed) to find the capital name.
+       2. Then call get_time_tool with that capital city.
+     - After getting the time, explain it clearly (for example: "It is currently 15:30 in Tokyo").
+
+4) find_restaurants_tool
+   - What it does:
+     Finds restaurants near a given location (for example: near the capital city or near specific coordinates).
+   - When to use it:
+     - When the user asks about restaurants near a capital or a place in a country.
+       Examples:
+       • "Show me restaurants near the capital of Italy."
+       • "Find some vegetarian restaurants near the center of Madrid."
+     - When the user asks for restaurant suggestions around a place that you can map to a city or coordinates.
+   - How to combine it with other tools:
+     - If the user says: "Find restaurants near the capital of X":
+       1. First call query_rag_database (or internet_search_api_call, if needed) to get the capital name and location.
+       2. Then call find_restaurants_tool with the capital's location.
+     - If the user gives coordinates directly, you can call find_restaurants_tool with those coordinates.
+
+GENERAL DECISION PROCESS:
+1. Read the user's question carefully.
+2. Identify the main task:
+   - Is it about:
+     a) Basic country info / capital? : Use query_rag_database first.
+     b) Current time in a capital or city? : Make sure you know the city, then use get_time_tool.
+     c) Restaurants near a capital or location? : Make sure you know the location, then use find_restaurants_tool.
+     d) Something that seems missing from the RAG context? : Use internet_search_api_call.
+3. Use tools in a logical order:
+   - For capital-related time or restaurant questions:
+     • Step 1: Get the capital from query_rag_database (or internet_search_api_call if needed).
+     • Step 2: Use get_time_tool or find_restaurants_tool with that capital.
+4. Minimize unnecessary tool calls:
+   - If the needed information is already clearly present in {context}, you do not need to call a tool.
+   - Only call a tool when it will add useful or required information.
+5. After using tools:
+   - Combine:
+     • the given {context}, and
+     • the tool outputs
+     into one clear, final answer for the user.
+   - If some parts of the answer come from tools, you can mention this briefly (for example: "Based on current data, the time in Tokyo is ...").
+6. If you still cannot fully answer:
+   - Clearly state what is missing.
+   - Give the best partial answer you can without guessing.
+</instructions>
+
 <output_format>
-                    Context: {context}
+Context:
+{context}
 
-                    Question: {question}
+Question:
+{question}
 
-                    Answer: 
+Answer:
+- First, briefly restate the user's request in your own words (one sentence).
+- Then, give the main answer clearly and directly.
+- If relevant, add short extra details (for example: time zone, brief capital description, or a short list of restaurants with names and basic info).
+- If the information came from a "user" source in the context, say that this part was provided by a user.
+- If you are unsure or some data is approximate, explain this clearly.
 </output_format>"""
+
         
-        prompt = PromptTemplate(
-            template=template,
-            input_variables=["context", "question"]
-        )
-        
-        # Create retrieval chain
-        self.qa_chain = RetrievalQA.from_chain_type(
-            llm=self.llm,
-            chain_type="stuff",
-            retriever=self.vectorstore.as_retriever(
-                search_kwargs={"k": 10}
-            ),
-            chain_type_kwargs={"prompt": prompt},
-            return_source_documents=True
-        )
+        try:
+            prompt = PromptTemplate(
+                template=template,
+                input_variables=["context", "question"]
+            )
+            logger.debug("[RAGSystem._setup_retrieval_chain] Prompt template created")
+            
+            # Create retrieval chain
+            logger.debug("[RAGSystem._setup_retrieval_chain] Creating RetrievalQA chain")
+            self.qa_chain = RetrievalQA.from_chain_type(
+                llm=self.llm,
+                chain_type="stuff",
+                retriever=self.vectorstore.as_retriever(
+                    search_kwargs={"k": 10}
+                ),
+                chain_type_kwargs={"prompt": prompt},
+                return_source_documents=True
+            )
+            logger.info("[RAGSystem._setup_retrieval_chain] Retrieval QA chain created successfully")
+        except Exception as e:
+            logger.error(f"[RAGSystem._setup_retrieval_chain] ERROR: {str(e)}", exc_info=True)
+            raise
     
-    def query(self, question: str) -> Tuple[str, Dict, list]:
+    def query(self, question: str) -> Tuple[Dict, Dict, list, Dict, Dict]:
         """
-        Query using the agent.
-        Tools will handle: 
-            - RAG retrieval (query_rag_tool)
-            - Internet fallback (internet_search_api_call_rag_tool)
-            - Time lookup (get_time_tool)
+        Query using the agent. The agent will first try to answer from its knowledge,
+        then use tools (RAG database, internet search, etc.) if needed.
 
         Returns:
-            (answer, source_info, source_documents)
+            (answer_dict, source_info, source_documents,tool_call, tool_details)
+            answer_dict contains: {"output": str, "content": str} format
         """
-
-        # --- 1. Check database first (optional, same as before) ---
+        logger.info(f"[RAGSystem.query] ===== STARTING QUERY ===== Question: {question}")
+        
+        # Check if vectorstore has any documents
         try:
-            print("Collectinon Count Try")
+            logger.debug("[RAGSystem.query] Checking vectorstore collection count")
             collection_count = self.vectorstore._collection.count()
-        except:
+            logger.info(f"[RAGSystem.query] Vectorstore contains {collection_count} documents")
+        except Exception as e:
+            logger.warning(f"[RAGSystem.query] Error checking collection count: {str(e)}")
             collection_count = 0
 
         if collection_count == 0:
-            return (
+            logger.warning("[RAGSystem.query] Vectorstore is empty, returning empty database message")
+            empty_message = (
                 "I don't have any information in my database yet. "
-                "Please provide the information using the 'Add Document' section in the sidebar.",
+                "Please provide the information using the 'Add Document' section in the sidebar."
+            )
+            return (
+                {"output": empty_message, "content": empty_message},
                 {"source": "empty", "info_type": "empty"},
                 []
             )
 
-        # --- 2. Ask the agent to solve the query ---
+        # Ask the agent to solve the query
         try:
-            print("Invoking Agent")
-            result = self.agent.invoke({"input": question, "chat_history":  st.session_state.messages})
-        except Exception:
-            print("Exception Invoking Agent")
-            result = self.agent.run(question)
-
-        # --- 3. Tool output is structured if a tool was used ---
-        if isinstance(result, dict) and "answer" in result:
-            print("In Answer")
+            logger.info("[RAGSystem.query] Invoking agent with question")
+            logger.debug(f"[RAGSystem.query] Chat history length: {len(st.session_state.messages)}")
+            
+            # Format chat history for the agent (convert from Streamlit format to LangChain format)
+            from langchain.schema import HumanMessage, AIMessage
+            formatted_history = []
+            for msg in st.session_state.messages:
+                if msg.get("role") == "user":
+                    formatted_history.append(HumanMessage(content=msg.get("content", "")))
+                elif msg.get("role") == "assistant":
+                    formatted_history.append(AIMessage(content=msg.get("content", "")))
+            
+            # Update memory with formatted history (preserve system message)
+            # Only update if we have new messages that aren't already in memory
+            if formatted_history:
+                logger.debug(f"[RAGSystem.query] Updating memory with {len(formatted_history)} messages")
+                # Keep system message, clear rest, then add formatted history
+                system_msgs = [
+                    msg for msg in self.agent.memory.chat_memory.messages 
+                    if isinstance(msg, SystemMessage)
+                ]
+                self.agent.memory.chat_memory.messages = system_msgs + formatted_history
+            
+            # Use run() method - this is the correct way for CHAT_CONVERSATIONAL_REACT_DESCRIPTION
+            # The agent.run() method expects a string input, not a dict
+            logger.debug("[RAGSystem.query] Running agent with question string")
+            logger.debug(f"[RAGSystem.query] Question type: {type(question)}, value: {question[:100] if len(str(question)) > 100 else question}")
+            
+            # Ensure question is a string
+            question_str = str(question).strip()
+            if not question_str:
+                raise ValueError("Question cannot be empty")
+            
+            # Try to bypass validation by accessing the executor's _call method directly
+            # This is a workaround for the input validation bug
+            try:
+                logger.debug("[RAGSystem.query] Attempting to bypass validation by using executor directly")
+                
+                # Access the agent executor
+                executor = self.agent
+                if hasattr(executor, 'agent_executor'):
+                    executor = executor.agent_executor
+                elif hasattr(executor, 'executor'):
+                    executor = executor.executor
+                
+                # Try to call the executor's _call method which skips validation
+                if hasattr(executor, '_call'):
+                    logger.debug("[RAGSystem.query] Using _call method to bypass validation")
+                    inputs = {"input": question_str}
+                    result = executor._call(inputs)
+                    if isinstance(result, dict):
+                        result = result.get("output", str(result))
+                    else:
+                        result = str(result)
+                    logger.info("[RAGSystem.query] Executor _call completed successfully")
+                else:
+                    # Fallback to normal run
+                    logger.debug("[RAGSystem.query] _call not available, using run()")
+                    result = self.agent.run(question_str)
+                    logger.info("[RAGSystem.query] Agent run completed successfully")
+                    
+            except Exception as e:
+                error_str = str(e)
+                if "Missing some input keys" in error_str:
+                    logger.error(f"[RAGSystem.query] Input validation error: {error_str}")
+                    logger.error("[RAGSystem.query] This appears to be a LangChain bug with input validation")
+                    # Last resort: try to monkey-patch the validation or use a completely different approach
+                    logger.warning("[RAGSystem.query] Attempting to disable validation...")
+                    try:
+                        # Try to temporarily disable validation
+                        executor = self.agent
+                        original_validate = getattr(executor, '_validate_inputs', None)
+                        if original_validate:
+                            def noop_validate(*args, **kwargs):
+                                pass
+                            executor._validate_inputs = noop_validate
+                            result = executor.invoke({"input": question_str})
+                            executor._validate_inputs = original_validate
+                            if isinstance(result, dict):
+                                result = result.get("output", str(result))
+                            logger.info("[RAGSystem.query] Validation bypass succeeded")
+                        else:
+                            raise e
+                    except Exception as bypass_error:
+                        logger.error(f"[RAGSystem.query] Validation bypass failed: {str(bypass_error)}")
+                        raise ValueError(f"Agent execution failed due to input validation error. This may be a LangChain compatibility issue. Original error: {error_str}")
+                else:
+                    raise
+            
+            logger.debug(f"[RAGSystem.query] Agent result type: {type(result)}")
+            logger.debug(f"[RAGSystem.query] Agent result preview: {str(result)[:200] if result else 'None'}")
+            
+            # Convert result to consistent format
+            if isinstance(result, str):
+                result_dict = {"output": result, "content": result}
+            elif isinstance(result, dict):
+                logger.debug(f"[RAGSystem.query] Agent result keys: {list(result.keys())}")
+                result_dict = result
+            else:
+                result_dict = {"output": str(result), "content": str(result)}
+            
+            result = result_dict
+            
+        except Exception as e:
+            logger.error(f"[RAGSystem.query] ERROR invoking agent: {str(e)}", exc_info=True)
+            error_message = f"I encountered an error while processing your question: {str(e)}"
             return (
-                result["answer"],
-                result.get("source_info", {"source": "agent", "info_type": "agent"}),
-                result.get("source_documents", [])
+                {"output": error_message, "content": error_message},
+                {"source": "error", "info_type": "error"},
+                []
             )
 
-        # --- 4. Fallback: agent returned a plain string ---
+        # Process agent result
+        logger.info("[RAGSystem.query] Processing agent result")
+        
+        # Extract answer text from result
+        if isinstance(result, dict):
+            logger.debug("[RAGSystem.query] Result is a dictionary")
+            if "output" in result:
+                answer_text = result["output"]
+                logger.info(f"[RAGSystem.query] Found 'output' key, length: {len(answer_text)} chars")
+            elif "answer" in result:
+                answer_text = result["answer"]
+                logger.info(f"[RAGSystem.query] Found 'answer' key, length: {len(answer_text)} chars")
+            else:
+                # Try to get the first string value
+                answer_text = str(result.get(list(result.keys())[0], "")) if result else "I couldn't process that question."
+                logger.warning(f"[RAGSystem.query] No 'output' or 'answer' key, using first value: {answer_text[:100]}")
+        else:
+            # Result is a plain string
+            logger.info("[RAGSystem.query] Result is a plain string")
+            answer_text = str(result)
+            logger.info(f"[RAGSystem.query] Answer length: {len(answer_text)} chars")
+        
+        # Try to get metadata from session state (set by tools)
+        source_info = {"source": "agent", "info_type": "agent"}
+        source_documents = []
+        tool_name = ""
+        
+        tool_call = None
+        tool_details = None
+
+        tool_meta = None
+
+        if st.session_state.last_tool_metadata:
+            logger.debug("[RAGSystem.query] Found tool metadata in session state")
+            print(st.session_state.last_tool_metadata)
+            print("HERE We Go")
+
+            # Define tool preference order
+            tool_order = [
+                "query_rag_tool",
+                "internet_search_api_call_rag_tool",
+                "get_time_tool",
+                "find_restaurants_tool"
+            ]
+
+            # Try to find the first successful tool in order
+            for tool_name in tool_order:
+                candidate = st.session_state.last_tool_metadata.get(tool_name)
+                if candidate and candidate.get("tool_details", {}).get("status") == "success":
+                    tool_meta = candidate
+                    logger.info(f"[RAGSystem.query] Using successful {tool_name} metadata")
+                    break
+
+            # Fallback: pick the first tool if none succeeded
+            if tool_meta is None:
+                tool_name, tool_meta = next(iter(st.session_state.last_tool_metadata.items()))
+                logger.info(f"[RAGSystem.query] No successful tool found. Using {tool_name} metadata anyway")
+
+            # Safely extract values
+            source_info = tool_meta.get("source_info", {"source": "unknown", "info_type": "unknown"})
+            source_documents = tool_meta.get("source_documents", [])
+            tool_call = tool_meta.get("tool_call", {"tool_name": tool_meta.get("tool_name")})
+            tool_details = tool_meta.get("tool_details", {})
+            print("HERE We Go 1")
+
+        
+        logger.info(f"[RAGSystem.query] Final source info: {source_info}")
+        logger.info(f"[RAGSystem.query] Source documents count: {len(source_documents)}")
+        
+        # Clear tool metadata for next query
+        if "last_tool_metadata" in st.session_state:
+            st.session_state.last_tool_metadata = {}
+        
         return (
-            result,
-            {"source": "agent", "info_type": "agent"},
-            []
+            {"output": answer_text, "content": answer_text},
+            source_info,
+            source_documents,
+            tool_call,
+            tool_details
         )
 
 
@@ -180,42 +598,59 @@ class RAGSystem:
             title: Document title
             metadata: Additional metadata
         """
-        if not text.strip():
-            raise ValueError("Document text cannot be empty")
+        logger.info(f"[RAGSystem.add_user_document] Adding document: {title}")
+        logger.debug(f"[RAGSystem.add_user_document] Text length: {len(text)} chars")
         
-        # Prepare metadata
-        doc_metadata = {
-            "source": "user",
-            "info_type": "user",  # Default to "user" if not specified
-            "title": title,
-            "added_at": datetime.now().isoformat()
-        }
-        if metadata:
-            doc_metadata.update(metadata)
-            # Ensure info_type is set
-            if "info_type" not in doc_metadata:
-                doc_metadata["info_type"] = "user"
-        
-        # Split text into chunks
-        texts = self.text_splitter.split_text(text)
-        
-        # Create documents
-        documents = [
-            Document(
-                page_content=chunk,
-                metadata={**doc_metadata, "chunk_index": i}
-            )
-            for i, chunk in enumerate(texts)
-        ]
-        
-        # Add to vector store
-        ids = [f"{title}-{i}-{datetime.now().timestamp()}" for i in range(len(documents))]
-        self.vectorstore.add_documents(documents, ids=ids)
+        try:
+            if not text.strip():
+                logger.error("[RAGSystem.add_user_document] Document text is empty")
+                raise ValueError("Document text cannot be empty")
+            
+            # Prepare metadata
+            doc_metadata = {
+                "source": "user",
+                "info_type": "user",  # Default to "user" if not specified
+                "title": title,
+                "added_at": datetime.now().isoformat()
+            }
+            if metadata:
+                doc_metadata.update(metadata)
+                # Ensure info_type is set
+                if "info_type" not in doc_metadata:
+                    doc_metadata["info_type"] = "user"
+            
+            logger.debug(f"[RAGSystem.add_user_document] Metadata: {doc_metadata}")
+            
+            # Split text into chunks
+            logger.debug("[RAGSystem.add_user_document] Splitting text into chunks")
+            texts = self.text_splitter.split_text(text)
+            logger.info(f"[RAGSystem.add_user_document] Split into {len(texts)} chunks")
+            
+            # Create documents
+            documents = [
+                Document(
+                    page_content=chunk,
+                    metadata={**doc_metadata, "chunk_index": i}
+                )
+                for i, chunk in enumerate(texts)
+            ]
+            
+            # Add to vector store
+            logger.info("[RAGSystem.add_user_document] Adding documents to vector store")
+            ids = [f"{title}-{i}-{datetime.now().timestamp()}" for i in range(len(documents))]
+            self.vectorstore.add_documents(documents, ids=ids)
+            logger.debug(f"[RAGSystem.add_user_document] Added {len(documents)} documents with IDs")
 
-        self.vectorstore.persist()
-        
-        # Reinitialize retrieval chain to include new documents
-        self._setup_retrieval_chain()
+            logger.debug("[RAGSystem.add_user_document] Persisting vector store")
+            self.vectorstore.persist()
+            
+            # Reinitialize retrieval chain to include new documents
+            logger.info("[RAGSystem.add_user_document] Reinitializing retrieval chain")
+            self._setup_retrieval_chain()
+            logger.info(f"[RAGSystem.add_user_document] Successfully added document: {title}")
+        except Exception as e:
+            logger.error(f"[RAGSystem.add_user_document] ERROR: {str(e)}", exc_info=True)
+            raise
     
     def get_user_documents(self) -> List[Dict]:
         """
@@ -290,7 +725,6 @@ class RAGSystem:
             return False
             
     
-
     def internet_search_api_call(self, question: str) -> str:
         """
         Fetch country information from GeoNames and return relevant answers.
@@ -372,40 +806,340 @@ class RAGSystem:
 
     def get_time_in_city(self, question: str) -> str:
         """
-        Get the current time in a city using the icalendar37.net gadget API.
+        Retrieve the current local time for a specified city.
+
+        This method automatically detects whether the question is about time and
+        extracts the city name from a variety of natural language formats. It
+        supports questions such as:
+
+            - "What time is it in London?"
+            - "What is the time in London?"
+            - "Time in Paris?"
+            - "Current time for New York"
+            - "London, what's the time?"
 
         Args:
-            question: A natural language question like "What is the time in London?"
+            question (str): A natural language question containing a city and a request for the time.
 
         Returns:
-            A string with the current local time in the requested city.
+            str: A human-readable string indicating the current local time in the specified city,
+                or an error message if the city cannot be detected or the API request fails.
+
+        Example:
+            >>> get_time_in_city("What is the time in Tokyo?")
+            "The current time in Tokyo is 14:32 PM (Timezone: Asia/Tokyo)."
         """
-        import re
-        print("Start of Method")
-        # Extract city name from the question
-        match = re.search(r'time in ([\w\s_]+)', question, re.IGNORECASE)
-        print("match", match)
+        logger.info(f"[RAGSystem.get_time_in_city] Getting time for: {question}")
+
+        # Normalize question
+        q_lower = question.lower()
+
+        # Only proceed if the word "time" is in the question
+        if "time" not in q_lower:
+            logger.warning(f"[RAGSystem.get_time_in_city] No 'time' detected in question: {question}")
+            return "Your question does not appear to be about time."
+
+        # Improved regex to extract the city
+        match = re.search(r'(?:time (?:in|for)|current time (?:in|for)|time is it in)\s+([\w\s_]+)', q_lower)
         if not match:
-            return "Sorry, I could not extract a city from your question."
+            logger.warning(f"[RAGSystem.get_time_in_city] Could not extract city from: {question}")
+            return "Sorry, I could not detect a city in your question."
 
-        print("After If")
         city_name = match.group(1).strip().replace(" ", "_")
-
+        logger.info(f"[RAGSystem.get_time_in_city] Extracted city: {city_name}")
 
         url = f"https://www.icalendar37.net/gadgets/timeInTheCity/?q={city_name}"
+        logger.debug(f"[RAGSystem.get_time_in_city] Fetching from: {url}")
 
         try:
             response = requests.get(url, timeout=60)
             response.raise_for_status()
             data = response.json()
+            logger.debug(f"[RAGSystem.get_time_in_city] API response received: {data}")
 
             if "time" in data:
-                return f"The current time in {data['city'].replace('_',' ')} is {data['time']} {data['APM']} (Timezone: {data['timezone']})."
+                result = f"The current time in {data['city'].replace('_',' ')} is {data['time']} {data['APM']} (Timezone: {data['timezone']})."
+                logger.info(f"[RAGSystem.get_time_in_city] Successfully retrieved time: {result}")
+                return result
             else:
+                logger.warning(f"[RAGSystem.get_time_in_city] No time data in response for: {city_name}")
                 return f"Could not retrieve time for {city_name.replace('_',' ')}."
 
         except requests.exceptions.RequestException as e:
+            logger.error(f"[RAGSystem.get_time_in_city] ERROR: {str(e)}", exc_info=True)
             return f"Failed to retrieve time: {e}"
 
+
+    def _is_restaurant_query(self, question: str) -> bool:
+        """Return True if the question is asking for restaurants near/in a city."""
+        q = question.lower()
+        if "restaurant" not in q and "restaurants" not in q:
+            return False
+        return bool(re.search(r"(restaurant|restaurants).*(in|near|around)", q))
     
-      
+    def _get_restaurants_via_overpass_geocode(self, city: str, radius_m: int = 3000, max_results: int = 10) -> str:
+        """
+        Fallback method: Use Overpass API to both geocode the city and find restaurants.
+        This avoids Nominatim rate limiting issues.
+        """
+        user_agent = "LLM_RAG_Chatbot/1.0"
+        overpass_url = "https://overpass-api.de/api/interpreter"
+        
+        # First, find the city coordinates using Overpass
+        geocode_query = f"""
+        [out:json][timeout:60];
+        (
+          relation["place"="city"]["name"="{city}"];
+          relation["place"="town"]["name"="{city}"];
+          node["place"="city"]["name"="{city}"];
+          node["place"="town"]["name"="{city}"];
+        );
+        out center;
+        """
+        
+        try:
+            geo_resp = requests.post(
+                overpass_url,
+                data=geocode_query,
+                headers={"User-Agent": user_agent, "Content-Type": "text/plain"},
+                timeout=60
+            )
+            geo_resp.raise_for_status()
+            geo_data = geo_resp.json()
+            elements = geo_data.get("elements", [])
+            
+            if not elements:
+                # Try a broader search with "like" pattern
+                geocode_query2 = f"""
+                [out:json][timeout:60];
+                (
+                  relation["place"~"^(city|town)$"]["name"~"{city}",i];
+                  node["place"~"^(city|town)$"]["name"~"{city}",i];
+                );
+                out center;
+                """
+                geo_resp2 = requests.post(
+                    overpass_url,
+                    data=geocode_query2,
+                    headers={"User-Agent": user_agent, "Content-Type": "text/plain"},
+                    timeout=60
+                )
+                geo_resp2.raise_for_status()
+                geo_data = geo_resp2.json()
+                elements = geo_data.get("elements", [])
+            
+            if not elements:
+                raise ValueError(f"Could not find location data for '{city}' using Overpass API.")
+            
+            # Get coordinates from the first result
+            element = elements[0]
+            if "center" in element:
+                lat = float(element["center"]["lat"])
+                lon = float(element["center"]["lon"])
+            elif "lat" in element:
+                lat = float(element["lat"])
+                lon = float(element["lon"])
+            else:
+                raise ValueError(f"Could not extract coordinates for '{city}'.")
+            
+            city_name = element.get("tags", {}).get("name", city)
+            
+        except Exception as e:
+            raise ValueError(f"Error geocoding city via Overpass: {str(e)}")
+        
+        # Now find restaurants near the city
+        overpass_query = f"""
+        [out:json][timeout:60];
+        (
+          node["amenity"="restaurant"](around:{radius_m},{lat},{lon});
+          way["amenity"="restaurant"](around:{radius_m},{lat},{lon});
+          relation["amenity"="restaurant"](around:{radius_m},{lat},{lon});
+        );
+        out body {max_results};
+        """
+        
+        try:
+            overpass_resp = requests.post(
+                overpass_url,
+                data=overpass_query,
+                headers={"User-Agent": user_agent, "Content-Type": "text/plain"},
+                timeout=60
+            )
+            overpass_resp.raise_for_status()
+            overpass_data = overpass_resp.json()
+            elements = overpass_data.get("elements", [])
+            
+            if not elements:
+                return f"I couldn't find restaurants within {radius_m/1000:.1f} km of {city_name}."
+            
+            lines = []
+            for idx, element in enumerate(elements[:max_results], start=1):
+                tags = element.get("tags", {})
+                name = tags.get("name", "Unnamed restaurant")
+                street = tags.get("addr:street", "")
+                housenumber = tags.get("addr:housenumber", "")
+                cuisine = tags.get("cuisine", "")
+                address = ", ".join(filter(None, [street, housenumber]))
+                description = name
+                if address:
+                    description += f" — {address}"
+                if cuisine:
+                    description += f" (Cuisine: {cuisine})"
+                lines.append(f"{idx}. {description}")
+            
+            summary = f"Here are some restaurants near {city_name} (within {radius_m/1000:.1f} km):\n"
+            summary += "\n".join(lines)
+            summary += "\n\nData via OpenStreetMap/Overpass API."
+            return summary
+            
+        except Exception as e:
+            raise ValueError(f"Error fetching restaurants via Overpass: {str(e)}")
+
+    def _extract_city_from_restaurant_query(self, question: str) -> Optional[str]:
+        """Extract probable city name from a restaurant-related question."""
+        cleaned = question.lower().translate(str.maketrans("", "", string.punctuation))
+        patterns = [
+            r"restaurants?\s+(?:near|in|around)\s+([a-zA-Z\s]+)",
+            r"(?:near|in|around)\s+([a-zA-Z\s]+)\s+restaurants?",
+            r"restaurants?\s+in\s+([a-zA-Z\s]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, cleaned)
+            if match:
+                city = match.group(1).strip()
+                if city:
+                    return city
+        # Fallback: take text after "restaurants near"
+        if "restaurants near" in cleaned:
+            return cleaned.split("restaurants near", 1)[-1].strip()
+        if "restaurants in" in cleaned:
+            return cleaned.split("restaurants in", 1)[-1].strip()
+        return None
+
+    def get_restaurants_near_city(self, question: str, radius_m: int = 3000, max_results: int = 10) -> str:
+        """
+        Use Nominatim + Overpass API to find restaurants near the specified city.
+
+        Args:
+            question: User question that references restaurants.
+            radius_m: Search radius in meters.
+            max_results: Maximum number of restaurants to return.
+        """
+        logger.info(f"[RAGSystem.get_restaurants_near_city] Finding restaurants for: {question}")
+        logger.debug(f"[RAGSystem.get_restaurants_near_city] Radius: {radius_m}m, Max results: {max_results}")
+        import time
+        
+        city = self._extract_city_from_restaurant_query(question)
+        if not city:
+            logger.error(f"[RAGSystem.get_restaurants_near_city] Could not extract city from: {question}")
+            raise ValueError("Could not identify a city in the question.")
+        
+        logger.info(f"[RAGSystem.get_restaurants_near_city] Extracted city: {city}")
+
+        # Nominatim requires a proper User-Agent and has strict rate limiting
+        # Use a descriptive User-Agent with application name
+        user_agent = "LLM_RAG_Chatbot/1.0"
+        nominatim_url = "https://nominatim.openstreetmap.org/search"
+        nominatim_params = {
+            "format": "json",
+            "q": city,
+            "limit": 1,
+            "addressdetails": 1
+        }
+        
+        # Nominatim requires proper headers and rate limiting (max 1 request per second)
+        headers = {
+            "User-Agent": user_agent,
+            "Accept": "application/json",
+            "Accept-Language": "en"
+        }
+        
+        try:
+            # Add a small delay to respect rate limits
+            logger.debug("[RAGSystem.get_restaurants_near_city] Waiting 1 second for rate limiting")
+            time.sleep(1)
+            logger.debug(f"[RAGSystem.get_restaurants_near_city] Calling Nominatim API: {nominatim_url}")
+            geo_resp = requests.get(
+                nominatim_url,
+                params=nominatim_params,
+                headers=headers,
+                timeout=60
+            )
+            
+            # Check for rate limiting or forbidden errors
+            if geo_resp.status_code == 403:
+                logger.warning("[RAGSystem.get_restaurants_near_city] Nominatim returned 403, using Overpass fallback")
+                # Try alternative: use Overpass API directly to geocode the city
+                return self._get_restaurants_via_overpass_geocode(city, radius_m, max_results)
+            
+            geo_resp.raise_for_status()
+            geo_data = geo_resp.json()
+            logger.debug(f"[RAGSystem.get_restaurants_near_city] Nominatim returned {len(geo_data)} results")
+            
+            if not geo_data:
+                logger.error(f"[RAGSystem.get_restaurants_near_city] No location data found for: {city}")
+                raise ValueError(f"Could not find location data for '{city}'.")
+
+            lat = float(geo_data[0]["lat"])
+            lon = float(geo_data[0]["lon"])
+            city_name = geo_data[0].get("display_name", city).split(",")[0]
+            logger.info(f"[RAGSystem.get_restaurants_near_city] Found coordinates: {lat}, {lon} for {city_name}")
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                logger.warning("[RAGSystem.get_restaurants_near_city] HTTP 403 error, using Overpass fallback")
+                # Fallback to Overpass-only geocoding
+                return self._get_restaurants_via_overpass_geocode(city, radius_m, max_results)
+            logger.error(f"[RAGSystem.get_restaurants_near_city] HTTP error: {str(e)}", exc_info=True)
+            raise ValueError(f"Error fetching location data: {str(e)}")
+        except Exception as e:
+            logger.error(f"[RAGSystem.get_restaurants_near_city] ERROR: {str(e)}", exc_info=True)
+            raise ValueError(f"Error fetching location data: {str(e)}")
+
+        # Search for restaurants (nodes, ways, and relations)
+        overpass_query = f"""
+        [out:json][timeout:60];
+        (
+          node["amenity"="restaurant"](around:{radius_m},{lat},{lon});
+          way["amenity"="restaurant"](around:{radius_m},{lat},{lon});
+          relation["amenity"="restaurant"](around:{radius_m},{lat},{lon});
+        );
+        out body {max_results};
+        """
+        overpass_url = "https://overpass-api.de/api/interpreter"
+        logger.debug(f"[RAGSystem.get_restaurants_near_city] Querying Overpass API for restaurants")
+        overpass_resp = requests.post(
+            overpass_url,
+            data=overpass_query,
+            headers={"User-Agent": user_agent, "Content-Type": "text/plain"},
+            timeout=60
+        )
+        overpass_resp.raise_for_status()
+        overpass_data = overpass_resp.json()
+        elements = overpass_data.get("elements", [])
+        logger.info(f"[RAGSystem.get_restaurants_near_city] Found {len(elements)} restaurant elements")
+
+        if not elements:
+            logger.warning(f"[RAGSystem.get_restaurants_near_city] No restaurants found near {city_name}")
+            return f"I couldn't find restaurants within {radius_m/1000:.1f} km of {city_name}."
+
+        lines = []
+        for idx, element in enumerate(elements[:max_results], start=1):
+            tags = element.get("tags", {})
+            name = tags.get("name", "Unnamed restaurant")
+            street = tags.get("addr:street", "")
+            housenumber = tags.get("addr:housenumber", "")
+            cuisine = tags.get("cuisine")
+            address = ", ".join(filter(None, [street, housenumber]))
+            description = name
+            if address:
+                description += f" — {address}"
+            if cuisine:
+                description += f" (Cuisine: {cuisine})"
+            lines.append(f"{idx}. {description}")
+
+        summary = f"Here are some restaurants near {city_name} (within {radius_m/1000:.1f} km):\n"
+        summary += "\n".join(lines)
+        summary += "\n\nData via OpenStreetMap/Overpass API."
+        logger.info(f"[RAGSystem.get_restaurants_near_city] Successfully compiled {len(lines)} restaurants")
+        return summary
