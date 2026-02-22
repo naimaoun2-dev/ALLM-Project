@@ -19,7 +19,7 @@ A powerful chatbot application built with Streamlit and LangChain that uses RAG 
 
 ## Setup
 
-### 1. Install Dependencies
+### 1. Install Dependencies: python version :3.13; langchain version: 0.3.27
 
 ```bash
 pip install -r requirements.txt
@@ -45,7 +45,7 @@ python populate_db.py
 
 This will add information about 20 countries including their names, flag colors, capitals, populations, and continents. All entries will have `info_type: db`.
 
-### 4. Run the Application
+### 4. Run the Application: don't forget to add your gemini key in the .env file
 
 ```bash
 streamlit run app.py
@@ -111,7 +111,7 @@ The application will open in your browser at `http://localhost:8501`
 - Pre-populated country data has `info_type: db`
 - User-provided documents have `info_type: user`
 - The system automatically chunks documents for better retrieval
-- Internet search is a placeholder and can be implemented later (would use `info_type: internet`)
+- Internet search is a placeholder (would use `info_type: internet`)
 
 ## License
 

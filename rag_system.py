@@ -1,11 +1,10 @@
 """
-RAG System using LangChain and Chroma DB
+RAG System using LangGraph (multi-agent), Chroma DB, and LangChain for retrieval.
 """
 import os
 import logging
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
-from pydantic.v1 import tools
 import requests
 import string
 import re
@@ -15,10 +14,8 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document, SystemMessage
-from langchain.agents import initialize_agent, AgentType
-from langchain.memory import ConversationBufferMemory
-from rag_utils import query_rag_tool, internet_search_api_call_rag_tool, get_time_tool, find_restaurants_tool
+from langchain.schema import Document
+from langgraph_agents import build_graph, run_graph
 import streamlit as st
 
 
@@ -89,88 +86,15 @@ class RAGSystem:
             logger.error(f"[RAGSystem.__init__] ERROR during initialization: {str(e)}", exc_info=True)
             raise
 
-        tools = [
-                    query_rag_tool,
-                    internet_search_api_call_rag_tool,
-                    get_time_tool,
-                    find_restaurants_tool
-                ]
-
-        # Custom system prompt for the agent
-        agent_system_prompt = """You are a helpful assistant that answers questions about countries, capitals, geography, time zones, and restaurants.
-
-IMPORTANT DECISION PROCESS:
-1. FIRST, try to answer the question from your own knowledge. If you are confident and certain about the answer, provide it directly.
-2. ONLY use tools when:
-   - You don't know the answer or are uncertain
-   - You need to verify information
-   - You need specific data from the database (like user-provided documents)
-   - You need current time information
-   - You need to find restaurants
-
-3. When you need to use tools:
-   - For country/capital questions you don't know: First try query_rag_tool to check the database. If that doesn't help, use internet_search_api_call_rag_tool.
-   - For time questions: Use get_time_tool. If you need the capital first, use query_rag_tool to get it.
-   - For restaurant questions: Use find_restaurants_tool. If you need the capital first, use query_rag_tool to get it.
-
-4. Be honest: If you don't know something, say so and use the appropriate tool. Don't guess or make up information.
-
-5. When using query_rag_tool, remember it searches a user-populated database. If it returns no results or incomplete information, use internet_search_api_call_rag_tool as a fallback.
-
-Always be helpful, clear, and accurate. If information comes from user-provided documents, mention that."""
-
-        logger.info("[RAGSystem.__init__] Initializing agent with custom system prompt")
-        logger.debug(f"[RAGSystem.__init__] Agent system prompt: {agent_system_prompt[:200]}...")
-        
-        # Create memory with system message
-        memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
-        )
-        # Add system message to memory
-        memory.chat_memory.add_message(SystemMessage(content=agent_system_prompt))
-        
+        # Multi-agent LangGraph (3 agents: Router with SOM, DB agent, Internet agent) with MemorySaver
         try:
-            # Try using OPENAI_FUNCTIONS agent type which is more compatible
-            # If that doesn't work, we'll fall back to CHAT_CONVERSATIONAL_REACT_DESCRIPTION
-            try:
-                logger.info("[RAGSystem.__init__] Attempting to initialize with OPENAI_FUNCTIONS agent type")
-                self.agent = initialize_agent(
-                        tools=tools,
-                        llm=self.llm,
-                        agent=AgentType.OPENAI_FUNCTIONS,
-                        verbose=True,
-                        memory=memory,
-                        handle_parsing_errors=True,
-                        max_iterations=15,
-                        max_execution_time=300
-                    )
-                logger.info("[RAGSystem.__init__] Agent initialized with OPENAI_FUNCTIONS successfully")
-            except Exception as openai_error:
-                logger.warning(f"[RAGSystem.__init__] OPENAI_FUNCTIONS failed: {str(openai_error)}, trying CHAT_CONVERSATIONAL_REACT_DESCRIPTION")
-                # Fallback to CHAT_CONVERSATIONAL_REACT_DESCRIPTION
-                self.agent = initialize_agent(
-                        tools=tools,
-                        llm=self.llm,
-                        agent=AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION,
-                        verbose=True,
-                        memory=memory,
-                        handle_parsing_errors=True,
-                        max_iterations=15,
-                        max_execution_time=300
-                    )
-                logger.info("[RAGSystem.__init__] Agent initialized with CHAT_CONVERSATIONAL_REACT_DESCRIPTION successfully")
-            
-            # Debug: Check what input keys the agent expects
-            if hasattr(self.agent, 'input_keys'):
-                logger.info(f"[RAGSystem.__init__] Agent input keys: {self.agent.input_keys}")
-            if hasattr(self.agent, 'agent') and hasattr(self.agent.agent, 'llm_chain'):
-                chain_vars = getattr(self.agent.agent.llm_chain, 'input_variables', 'N/A')
-                logger.info(f"[RAGSystem.__init__] Agent LLM chain input variables: {chain_vars}")
+            logger.info("[RAGSystem.__init__] Building LangGraph (3 agents, conditional edges, MemorySaver)")
+            self.graph = build_graph()
+            logger.info("[RAGSystem.__init__] LangGraph built successfully")
         except Exception as e:
-            logger.error(f"[RAGSystem.__init__] Error initializing agent: {str(e)}", exc_info=True)
+            logger.error(f"[RAGSystem.__init__] Error building LangGraph: {str(e)}", exc_info=True)
             raise
-        
+
         # Initialize vector store (create directory if it doesn't exist)
         try:
             logger.info("[RAGSystem.__init__] Setting up vector store")
@@ -389,202 +313,89 @@ Answer:
             return (
                 {"output": empty_message, "content": empty_message},
                 {"source": "empty", "info_type": "empty"},
-                []
+                [],
+                None,
+                None,
+                {"agent_used": None, "route": None, "route_reason": None, "question_status": "acceptable", "legality_score": 5},
             )
 
-        # Ask the agent to solve the query
+        # Run LangGraph 
+        question_str = str(question).strip()
+        if not question_str:
+            raise ValueError("Question cannot be empty")
+
         try:
-            logger.info("[RAGSystem.query] Invoking agent with question")
-            logger.debug(f"[RAGSystem.query] Chat history length: {len(st.session_state.messages)}")
-            
-            # Format chat history for the agent (convert from Streamlit format to LangChain format)
-            from langchain.schema import HumanMessage, AIMessage
-            formatted_history = []
-            for msg in st.session_state.messages:
-                if msg.get("role") == "user":
-                    formatted_history.append(HumanMessage(content=msg.get("content", "")))
-                elif msg.get("role") == "assistant":
-                    formatted_history.append(AIMessage(content=msg.get("content", "")))
-            
-            # Update memory with formatted history (preserve system message)
-            # Only update if we have new messages that aren't already in memory
-            if formatted_history:
-                logger.debug(f"[RAGSystem.query] Updating memory with {len(formatted_history)} messages")
-                # Keep system message, clear rest, then add formatted history
-                system_msgs = [
-                    msg for msg in self.agent.memory.chat_memory.messages 
-                    if isinstance(msg, SystemMessage)
-                ]
-                self.agent.memory.chat_memory.messages = system_msgs + formatted_history
-            
-            # Use run() method - this is the correct way for CHAT_CONVERSATIONAL_REACT_DESCRIPTION
-            # The agent.run() method expects a string input, not a dict
-            logger.debug("[RAGSystem.query] Running agent with question string")
-            logger.debug(f"[RAGSystem.query] Question type: {type(question)}, value: {question[:100] if len(str(question)) > 100 else question}")
-            
-            # Ensure question is a string
-            question_str = str(question).strip()
-            if not question_str:
-                raise ValueError("Question cannot be empty")
-            
-            # Try to bypass validation by accessing the executor's _call method directly
-            # This is a workaround for the input validation bug
-            try:
-                logger.debug("[RAGSystem.query] Attempting to bypass validation by using executor directly")
-                
-                # Access the agent executor
-                executor = self.agent
-                if hasattr(executor, 'agent_executor'):
-                    executor = executor.agent_executor
-                elif hasattr(executor, 'executor'):
-                    executor = executor.executor
-                
-                # Try to call the executor's _call method which skips validation
-                if hasattr(executor, '_call'):
-                    logger.debug("[RAGSystem.query] Using _call method to bypass validation")
-                    inputs = {"input": question_str}
-                    result = executor._call(inputs)
-                    if isinstance(result, dict):
-                        result = result.get("output", str(result))
-                    else:
-                        result = str(result)
-                    logger.info("[RAGSystem.query] Executor _call completed successfully")
-                else:
-                    # Fallback to normal run
-                    logger.debug("[RAGSystem.query] _call not available, using run()")
-                    result = self.agent.run(question_str)
-                    logger.info("[RAGSystem.query] Agent run completed successfully")
-                    
-            except Exception as e:
-                error_str = str(e)
-                if "Missing some input keys" in error_str:
-                    logger.error(f"[RAGSystem.query] Input validation error: {error_str}")
-                    logger.error("[RAGSystem.query] This appears to be a LangChain bug with input validation")
-                    # Last resort: try to monkey-patch the validation or use a completely different approach
-                    logger.warning("[RAGSystem.query] Attempting to disable validation...")
-                    try:
-                        # Try to temporarily disable validation
-                        executor = self.agent
-                        original_validate = getattr(executor, '_validate_inputs', None)
-                        if original_validate:
-                            def noop_validate(*args, **kwargs):
-                                pass
-                            executor._validate_inputs = noop_validate
-                            result = executor.invoke({"input": question_str})
-                            executor._validate_inputs = original_validate
-                            if isinstance(result, dict):
-                                result = result.get("output", str(result))
-                            logger.info("[RAGSystem.query] Validation bypass succeeded")
-                        else:
-                            raise e
-                    except Exception as bypass_error:
-                        logger.error(f"[RAGSystem.query] Validation bypass failed: {str(bypass_error)}")
-                        raise ValueError(f"Agent execution failed due to input validation error. This may be a LangChain compatibility issue. Original error: {error_str}")
-                else:
-                    raise
-            
-            logger.debug(f"[RAGSystem.query] Agent result type: {type(result)}")
-            logger.debug(f"[RAGSystem.query] Agent result preview: {str(result)[:200] if result else 'None'}")
-            
-            # Convert result to consistent format
-            if isinstance(result, str):
-                result_dict = {"output": result, "content": result}
-            elif isinstance(result, dict):
-                logger.debug(f"[RAGSystem.query] Agent result keys: {list(result.keys())}")
-                result_dict = result
-            else:
-                result_dict = {"output": str(result), "content": str(result)}
-            
-            result = result_dict
-            
+            logger.info("[RAGSystem.query] Invoking LangGraph with question")
+            thread_id = str(id(st.session_state)) if hasattr(st, "session_state") else "default"
+            result = run_graph(self.graph, question_str, self, thread_id=thread_id)
         except Exception as e:
-            logger.error(f"[RAGSystem.query] ERROR invoking agent: {str(e)}", exc_info=True)
+            logger.error(f"[RAGSystem.query] ERROR invoking LangGraph: {str(e)}", exc_info=True)
             error_message = f"I encountered an error while processing your question: {str(e)}"
             return (
                 {"output": error_message, "content": error_message},
                 {"source": "error", "info_type": "error"},
-                []
+                [],
+                None,
+                None,
+                {"agent_used": None, "route": None, "route_reason": None, "question_status": "acceptable", "legality_score": 5},
             )
 
-        # Process agent result
-        logger.info("[RAGSystem.query] Processing agent result")
-        
-        # Extract answer text from result
-        if isinstance(result, dict):
-            logger.debug("[RAGSystem.query] Result is a dictionary")
-            if "output" in result:
-                answer_text = result["output"]
-                logger.info(f"[RAGSystem.query] Found 'output' key, length: {len(answer_text)} chars")
-            elif "answer" in result:
-                answer_text = result["answer"]
-                logger.info(f"[RAGSystem.query] Found 'answer' key, length: {len(answer_text)} chars")
-            else:
-                # Try to get the first string value
-                answer_text = str(result.get(list(result.keys())[0], "")) if result else "I couldn't process that question."
-                logger.warning(f"[RAGSystem.query] No 'output' or 'answer' key, using first value: {answer_text[:100]}")
-        else:
-            # Result is a plain string
-            logger.info("[RAGSystem.query] Result is a plain string")
-            answer_text = str(result)
-            logger.info(f"[RAGSystem.query] Answer length: {len(answer_text)} chars")
-        
-        # Try to get metadata from session state (set by tools)
-        source_info = {"source": "agent", "info_type": "agent"}
-        source_documents = []
-        tool_name = ""
-        
+        # Map graph state to return format (answer, source_info, source_documents, tool_call, tool_details, agent_info)
+        answer_text = result.get("final_answer") or result.get("tool_result") or "I couldn't generate an answer."
+        source_info = result.get("source_info") or {"source": "agent", "info_type": "agent"}
+        source_documents = result.get("source_documents") or []
+        tool_calls_list = result.get("tool_calls") or []
+        tool_name_used = result.get("tool_name_used")
+        route = result.get("route") or "direct"
+
+        # Human-readable agent that ran (for UI)
+        route_to_agent = {
+            "db": "Database (RAG) Agent",
+            "internet": "Internet Agent",
+            "time": "Time Agent",
+            "restaurant": "Restaurant Agent",
+            "refuse": "Refusal (no answer)",
+            "direct": "Synthesizer (direct answer)",
+        }
+        agent_used = route_to_agent.get(route, "Synthesizer (direct answer)")
+        question_status = result.get("question_status", "acceptable")
+        legality_score = result.get("legality_score", 5 if question_status == "acceptable" else -5)
+        agent_info = {
+            "agent_used": agent_used,
+            "route": route,
+            "route_reason": result.get("route_reason"),
+            "question_status": question_status,
+            "legality_score": legality_score,
+        }
+
         tool_call = None
         tool_details = None
+        if route != "direct" and tool_calls_list:
+            last_tc = tool_calls_list[-1] if isinstance(tool_calls_list[-1], dict) else {}
+            tool_call = {
+                "tool_name": tool_name_used or last_tc.get("tool_name", "unknown"),
+                "arguments": last_tc.get("arguments", {}),
+            }
+            tool_details = {
+                "status": last_tc.get("status", "success"),
+                "source_info": source_info,
+            }
 
-        tool_meta = None
+        if route == "direct":
+            source_info = {"source": "agent", "info_type": "agent"}
+            source_documents = []
+            
 
-        if st.session_state.last_tool_metadata:
-            logger.debug("[RAGSystem.query] Found tool metadata in session state")
-            print(st.session_state.last_tool_metadata)
-            print("HERE We Go")
-
-            # Define tool preference order
-            tool_order = [
-                "query_rag_tool",
-                "internet_search_api_call_rag_tool",
-                "get_time_tool",
-                "find_restaurants_tool"
-            ]
-
-            # Try to find the first successful tool in order
-            for tool_name in tool_order:
-                candidate = st.session_state.last_tool_metadata.get(tool_name)
-                if candidate and candidate.get("tool_details", {}).get("status") == "success":
-                    tool_meta = candidate
-                    logger.info(f"[RAGSystem.query] Using successful {tool_name} metadata")
-                    break
-
-            # Fallback: pick the first tool if none succeeded
-            if tool_meta is None:
-                tool_name, tool_meta = next(iter(st.session_state.last_tool_metadata.items()))
-                logger.info(f"[RAGSystem.query] No successful tool found. Using {tool_name} metadata anyway")
-
-            # Safely extract values
-            source_info = tool_meta.get("source_info", {"source": "unknown", "info_type": "unknown"})
-            source_documents = tool_meta.get("source_documents", [])
-            tool_call = tool_meta.get("tool_call", {"tool_name": tool_meta.get("tool_name")})
-            tool_details = tool_meta.get("tool_details", {})
-            print("HERE We Go 1")
-
-        
         logger.info(f"[RAGSystem.query] Final source info: {source_info}")
-        logger.info(f"[RAGSystem.query] Source documents count: {len(source_documents)}")
-        
-        # Clear tool metadata for next query
-        if "last_tool_metadata" in st.session_state:
-            st.session_state.last_tool_metadata = {}
-        
+        logger.info(f"[RAGSystem.query] Agent used: {agent_used}")
+
         return (
             {"output": answer_text, "content": answer_text},
             source_info,
             source_documents,
             tool_call,
-            tool_details
+            tool_details,
+            agent_info,
         )
 
 

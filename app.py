@@ -176,6 +176,23 @@ def main():
             with st.chat_message("assistant"):
                 st.markdown(message.get("content", ""))
 
+                # Question status and legality score (for past messages)
+                agent_info = message.get("agent_info")
+                question_status = (agent_info or {}).get("question_status", "acceptable")
+                legality_score = (agent_info or {}).get("legality_score", 5)
+                if question_status == "unacceptable":
+                    st.caption("⚠️ **Question status:** Unacceptable")
+                else:
+                    st.caption("✅ **Question status:** Acceptable")
+                st.caption(f"📊 **Legality score:** {legality_score} / 5 (scale: -5 = very illegal, 5 = very legal)")
+
+                # Show which agent ran (for past messages)
+                if agent_info and agent_info.get("agent_used"):
+                    st.caption("🤖 **Agent:** Router → " + agent_info["agent_used"])
+                    if agent_info.get("route_reason"):
+                        with st.expander("Why this agent?"):
+                            st.caption(agent_info["route_reason"])
+
                 # Display info badge
                 info_type = message.get("info_type")
                 if info_type:
@@ -248,7 +265,7 @@ def main():
             with st.spinner("Thinking..."):
                 try:
                     # Query RAG system
-                    answer, source_info, source_documents, tool_call, tool_details = st.session_state.rag_system.query(prompt)
+                    answer, source_info, source_documents, tool_call, tool_details, agent_info = st.session_state.rag_system.query(prompt)
 
                     # Format answer
                     if isinstance(answer, dict):
@@ -258,6 +275,22 @@ def main():
 
                     st.markdown(formatted_response, unsafe_allow_html=False)
                     info_type = source_info.get("info_type", "agent")
+
+                    # Question status and legality score
+                    question_status = (agent_info or {}).get("question_status", "acceptable")
+                    legality_score = (agent_info or {}).get("legality_score", 5)
+                    if question_status == "unacceptable":
+                        st.warning("⚠️ **Question status:** Unacceptable")
+                    else:
+                        st.caption("✅ **Question status:** Acceptable")
+                    st.caption(f"📊 **Legality score:** {legality_score} / 5 (scale: -5 = very illegal, 5 = very legal)")
+
+                    # Show which agent ran (Router → DB / Internet / Synthesizer)
+                    if agent_info and agent_info.get("agent_used"):
+                        st.caption("🤖 **Agent:** Router → " + agent_info["agent_used"])
+                        if agent_info.get("route_reason"):
+                            with st.expander("Why this agent?"):
+                                st.caption(agent_info["route_reason"])
 
                     # Determine tool_name
                     if info_type == "db":
@@ -271,14 +304,15 @@ def main():
                     else:
                         tool_name = None
 
-                    # Store assistant message with tool metadata
+                    # Store assistant message with tool metadata and agent_info
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": formatted_response,
                         "source": source_info.get("source", "unknown") if source_info else "unknown",
                         "info_type": info_type,
                         "tool_call": tool_call,
-                        "tool_details": tool_details
+                        "tool_details": tool_details,
+                        "agent_info": agent_info,
                     })
 
                     # Store tool message if tool was used
@@ -330,6 +364,7 @@ def main():
                         "content": formatted_response,
                         "source": source_info.get("source", "unknown") if source_info else "unknown",
                         "info_type": info_type,
+                        "agent_used": agent_info.get("agent_used") if agent_info else None,
                         "timestamp": datetime.now().isoformat()
                     })
 
