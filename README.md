@@ -1,6 +1,6 @@
-# LLM Chatbot with RAG (Streamlit + LangChain)
+# LLM Chatbot with RAG (Streamlit + LangGraph)
 
-A powerful chatbot application built with Streamlit and LangChain that uses RAG (Retrieval-Augmented Generation) with Chroma DB for knowledge retrieval.
+A powerful chatbot application built with Streamlit and LangGraph that uses RAG (Retrieval-Augmented Generation) with Chroma DB for knowledge retrieval.
 
 ## Features
 
@@ -15,7 +15,7 @@ A powerful chatbot application built with Streamlit and LangChain that uses RAG 
 6. **Source Indication**: When information is retrieved, the system indicates the info type (db/user/internet)
 7. **Download Functionality**: Export chat history as PDF or Excel
 8. **Admin Panel**: Password-protected admin panel with 3 login attempts and 30-second lockout
-9. **Beautiful Outputs**: Formatted and beautified responses
+9. **Multi Agents**: Router, Internet, DB, Time, Restaurant, Synthesizer, Critic, Refusal
 
 ## Setup
 
@@ -93,12 +93,13 @@ The application will open in your browser at `http://localhost:8501`
 ├── rag_utils.py            # Tools
 ├── .env                   # Your environment variables (not in git)
 └── chroma_db/             # Chroma DB storage directory (created automatically)
+├── langgraph_agens.py            # Langgraph Creation + agents
 ```
 
 ## Technologies
 
 - **Streamlit**: Web application framework
-- **LangChain**: LLM application framework
+- **LangGraph**: LLM application framework
 - **Chroma DB**: Vector database for embeddings
 - **Google Gemini**: LLM and embeddings (via langchain-google-genai)
 - **ReportLab**: PDF generation
