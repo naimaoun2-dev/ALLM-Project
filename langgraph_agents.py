@@ -141,7 +141,7 @@ def router_node(state: GraphState, config: RunnableConfig | None = None) -> dict
         tool_name="router_node",
         arguments={"question": question},
         status="success",
-        source_info={"route": route, "confidence": confidence, "reason": reason},
+        source_info={"route": route, "confidence": confidence, "reason": reason}
     )
 
     return {
@@ -152,7 +152,7 @@ def router_node(state: GraphState, config: RunnableConfig | None = None) -> dict
         "step_count": new_step,
         "question_status": question_status,
         "legality_score": legality_score,
-        "tool_calls": state.tool_calls + [router_call],
+        "tool_calls": state.tool_calls + [router_call]
     }
 
 
@@ -182,7 +182,7 @@ def db_agent_node(state: GraphState, config: RunnableConfig | None = None) -> di
             tool_name="query_rag_tool",
             arguments={"question": question},
             status="error",
-            source_info=None,
+            source_info=None
         )
 
         return {
@@ -190,7 +190,7 @@ def db_agent_node(state: GraphState, config: RunnableConfig | None = None) -> di
             "source_info": {"source": "error", "info_type": "error"},
             "tool_name_used": "query_rag_tool",
             "tool_calls": state.tool_calls + [tool_record],
-            "step_count": new_step,
+            "step_count": new_step
         }
 
     try:
@@ -207,14 +207,14 @@ def db_agent_node(state: GraphState, config: RunnableConfig | None = None) -> di
             source_info = {
                 "source": meta.get("source", "database"),
                 "info_type": meta.get("info_type", "db"),
-                "metadata": json.dumps(meta),
+                "metadata": json.dumps(meta)
             }
 
         tool_record = ToolCallRecord(
             tool_name="query_rag_tool",
             arguments={"question": question},
             status="success",
-            source_info=source_info,
+            source_info=source_info
         )
 
         return {
@@ -224,7 +224,7 @@ def db_agent_node(state: GraphState, config: RunnableConfig | None = None) -> di
             "tool_name_used": "query_rag_tool",
             "tool_calls": state.tool_calls + [tool_record],
             "step_count": new_step,
-            "need_critic": False,
+            "need_critic": False
         }
 
     except Exception as e:
@@ -234,7 +234,7 @@ def db_agent_node(state: GraphState, config: RunnableConfig | None = None) -> di
             tool_name="query_rag_tool",
             arguments={"question": question},
             status="error",
-            source_info=None,
+            source_info=None
         )
 
         return {
@@ -242,7 +242,7 @@ def db_agent_node(state: GraphState, config: RunnableConfig | None = None) -> di
             "source_info": {"source": "error", "info_type": "error"},
             "tool_name_used": "query_rag_tool",
             "tool_calls": state.tool_calls + [tool_record],
-            "step_count": new_step,
+            "step_count": new_step
         }
 
 
@@ -262,14 +262,14 @@ def internet_agent_node(state: GraphState, config: RunnableConfig | None = None)
             tool_name="internet_search_api_call_rag_tool",
             arguments={"question": question},
             status="error",
-            source_info=None,
+            source_info=None
         )
         return {
             "tool_result": "Error: RAG system not available.",
             "source_info": {"source": "error", "info_type": "error"},
             "tool_name_used": "internet_search_api_call_rag_tool",
             "tool_calls": state.tool_calls + [tool_record],
-            "step_count": new_step,
+            "step_count": new_step
         }
 
     try:
@@ -281,7 +281,7 @@ def internet_agent_node(state: GraphState, config: RunnableConfig | None = None)
             tool_name="internet_search_api_call_rag_tool",
             arguments={"question": question},
             status="success",
-            source_info=source_info,
+            source_info=source_info
         )
 
         return {
@@ -291,7 +291,7 @@ def internet_agent_node(state: GraphState, config: RunnableConfig | None = None)
             "tool_name_used": "internet_search_api_call_rag_tool",
             "tool_calls": state.tool_calls + [tool_record],
             "step_count": new_step,
-            "need_critic": False,
+            "need_critic": False
         }
 
     except Exception as e:
@@ -301,7 +301,7 @@ def internet_agent_node(state: GraphState, config: RunnableConfig | None = None)
             tool_name="internet_search_api_call_rag_tool",
             arguments={"question": question},
             status="error",
-            source_info=None,
+            source_info=None
         )
 
         return {
@@ -309,7 +309,7 @@ def internet_agent_node(state: GraphState, config: RunnableConfig | None = None)
             "source_info": {"source": "error", "info_type": "error"},
             "tool_name_used": "internet_search_api_call_rag_tool",
             "tool_calls": state.tool_calls + [tool_record],
-            "step_count": new_step,
+            "step_count": new_step
         }
 
 
@@ -330,7 +330,7 @@ def time_agent_node(state: GraphState, config: RunnableConfig | None = None) -> 
             tool_name="get_time_tool",
             arguments={"question": question},
             status="error",
-            source_info=None,
+            source_info=None
         )
 
         return {
@@ -338,7 +338,7 @@ def time_agent_node(state: GraphState, config: RunnableConfig | None = None) -> 
             "source_info": {"source": "error", "info_type": "error"},
             "tool_name_used": "get_time_tool",
             "tool_calls": state.tool_calls + [tool_record],
-            "step_count": new_step,
+            "step_count": new_step
         }
 
     try:
@@ -350,7 +350,7 @@ def time_agent_node(state: GraphState, config: RunnableConfig | None = None) -> 
             tool_name="get_time_tool",
             arguments={"question": question},
             status="success",
-            source_info=source_info,
+            source_info=source_info
         )
 
         return {
@@ -360,7 +360,7 @@ def time_agent_node(state: GraphState, config: RunnableConfig | None = None) -> 
             "tool_name_used": "get_time_tool",
             "tool_calls": state.tool_calls + [tool_record],
             "step_count": new_step,
-            "need_critic": False,  # example explicit control
+            "need_critic": False
         }
 
     except Exception as e:
@@ -370,7 +370,7 @@ def time_agent_node(state: GraphState, config: RunnableConfig | None = None) -> 
             tool_name="get_time_tool",
             arguments={"question": question},
             status="error",
-            source_info=None,
+            source_info=None
         )
 
         return {
@@ -378,7 +378,7 @@ def time_agent_node(state: GraphState, config: RunnableConfig | None = None) -> 
             "source_info": {"source": "error", "info_type": "error"},
             "tool_name_used": "get_time_tool",
             "tool_calls": state.tool_calls + [tool_record],
-            "step_count": new_step,
+            "step_count": new_step
         }
 
 
@@ -397,7 +397,7 @@ def restaurant_agent_node(state: GraphState, config: RunnableConfig | None = Non
             tool_name="find_restaurants_tool",
             arguments={"question": question},
             status="error",
-            source_info=None,
+            source_info=None
         )
 
         return {
@@ -406,7 +406,7 @@ def restaurant_agent_node(state: GraphState, config: RunnableConfig | None = Non
             "tool_name_used": "find_restaurants_tool",
             "tool_calls": state.tool_calls + [tool_record],
             "step_count": new_step,
-            "need_critic": False,
+            "need_critic": False
         }
 
     try:
@@ -418,7 +418,7 @@ def restaurant_agent_node(state: GraphState, config: RunnableConfig | None = Non
             tool_name="find_restaurants_tool",
             arguments={"question": question},
             status="success",
-            source_info=source_info,
+            source_info=source_info
         )
 
         return {
@@ -428,7 +428,7 @@ def restaurant_agent_node(state: GraphState, config: RunnableConfig | None = Non
             "tool_name_used": "find_restaurants_tool",
             "tool_calls": state.tool_calls + [tool_record],
             "step_count": new_step,
-            "need_critic": False,
+            "need_critic": False
         }
 
     except Exception as e:
@@ -438,7 +438,7 @@ def restaurant_agent_node(state: GraphState, config: RunnableConfig | None = Non
             tool_name="find_restaurants_tool",
             arguments={"question": question},
             status="error",
-            source_info=None,
+            source_info=None
         )
 
         return {
@@ -446,7 +446,7 @@ def restaurant_agent_node(state: GraphState, config: RunnableConfig | None = Non
             "source_info": {"source": "error", "info_type": "error"},
             "tool_name_used": "find_restaurants_tool",
             "tool_calls": state.tool_calls + [tool_record],
-            "step_count": new_step,
+            "step_count": new_step
         }
 
 
@@ -492,7 +492,7 @@ def critic_node(state: GraphState, config: RunnableConfig | None = None) -> dict
 
     return {
         "need_critic": False,
-        "step_count": new_step,
+        "step_count": new_step
     }
 
 
@@ -514,7 +514,7 @@ def refusal_node(state: GraphState, config: RunnableConfig | None = None) -> dic
             "reason": "illegal/harmful/unethical",
         },
         status="refused",
-        source_info={"source": "agent", "info_type": "refusal"},
+        source_info={"source": "agent", "info_type": "refusal"}
     )
 
     return {
@@ -525,7 +525,7 @@ def refusal_node(state: GraphState, config: RunnableConfig | None = None) -> dic
         "tool_calls": state.tool_calls + [refusal_record],
         "question_status": "refused",
         "need_critic": False,
-        "step_count": new_step,
+        "step_count": new_step
     }
 
 
